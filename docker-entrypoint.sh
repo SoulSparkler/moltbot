@@ -16,6 +16,11 @@ if [ ! -f "$OPENCLAW_CONFIG_PATH" ]; then
 JSON
 fi
 
+# Debug: show config state
+echo "OPENCLAW_CONFIG_PATH=$OPENCLAW_CONFIG_PATH"
+ls -la "$(dirname "$OPENCLAW_CONFIG_PATH")" || true
+cat "$OPENCLAW_CONFIG_PATH" || true
+
 # Railway sets PORT, but openclaw expects OPENCLAW_GATEWAY_PORT or CLAWDBOT_GATEWAY_PORT
 # Map Railway's PORT to OPENCLAW_GATEWAY_PORT if not already set
 if [ -n "${PORT:-}" ] && [ -z "${OPENCLAW_GATEWAY_PORT:-}" ] && [ -z "${CLAWDBOT_GATEWAY_PORT:-}" ]; then
