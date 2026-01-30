@@ -32,8 +32,14 @@ if [ -n "${PORT:-}" ] && [ -z "${OPENCLAW_GATEWAY_PORT:-}" ] && [ -z "${CLAWDBOT
   export OPENCLAW_GATEWAY_PORT="$PORT"
 fi
 
+# Force bind to 0.0.0.0 for Railway (service must be reachable from Railway proxy)
+# Set both env vars and CLI flags for redundancy
+export OPENCLAW_GATEWAY_HOST="0.0.0.0"
+export OPENCLAW_GATEWAY_BIND="0.0.0.0"
+export HOST="0.0.0.0"
+
 # Default to 8080 if no port is set
 : "${OPENCLAW_GATEWAY_PORT:=8080}"
 
 # Run the gateway server with --allow-unconfigured for Railway deployments
-exec node openclaw.mjs gateway run --bind 0.0.0.0 --port "$OPENCLAW_GATEWAY_PORT" --allow-unconfigured
+exec node openclaw.mjs gateway run --bind 0.0.0.0 --host 0.0.0.0 --port "$OPENCLAW_GATEWAY_PORT" --allow-unconfigured
