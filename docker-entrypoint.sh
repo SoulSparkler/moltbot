@@ -3,6 +3,12 @@ set -euo pipefail
 
 : "${OPENCLAW_CONFIG_PATH:=/data/.openclaw/openclaw.json}"
 
+# Unlock /data directory (run as root before switching to node user)
+# These operations are non-fatal to handle cases where /data is read-only or already configured
+mkdir -p /data/.openclaw /data/workspace 2>/dev/null || true
+chown -R node:node /data 2>/dev/null || true
+chmod -R ug+rwX /data 2>/dev/null || true
+
 # Create minimal config if missing (Railway fresh volume)
 if [ ! -f "$OPENCLAW_CONFIG_PATH" ]; then
   echo "No config found at $OPENCLAW_CONFIG_PATH, creating minimal config..."
@@ -27,4 +33,5 @@ fi
 : "${OPENCLAW_GATEWAY_PORT:=8080}"
 
 # Run the gateway server with --allow-unconfigured for Railway deployments
-exec node openclaw.mjs gateway run --bind 0.0.0.0 --port "$OPENCLAW_GATEWAY_PORT" --allow-unconfigured
+# Switch to node user before executing the gateway
+su node -c "node openclaw.mjs gateway --bind 0.0.0.0 --port ${PORT:-8080} --allow-unconfigured"

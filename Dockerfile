@@ -46,11 +46,7 @@ ENV NODE_ENV=production
 # This directory MUST be mounted as a volume in Railway to persist pairing state
 RUN mkdir -p /data/.clawdbot && chown -R node:node /data
 
-# Security hardening: Run as non-root user
-# The node:22-bookworm image includes a 'node' user (uid 1000)
-# This reduces the attack surface by preventing container escape via root privileges
-USER node
-
 # Run the gateway server via entrypoint script
 # The script maps Railway's PORT env var to OPENCLAW_GATEWAY_PORT
+# Entrypoint runs as root to set /data permissions, then switches to node user
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
