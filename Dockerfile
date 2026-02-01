@@ -20,6 +20,9 @@ COPY . .
 # ✅ Skip alle build commando's die falen
 RUN pnpm ui:install
 
+# Build the UI assets
+RUN pnpm ui:build
+
 # Build the TypeScript source code
 RUN pnpm build
 
