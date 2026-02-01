@@ -1,7 +1,7 @@
 FROM node:22-bullseye-slim
 
-# ✅ curl en unzip installeren zodat bun werkt
-RUN apt-get update && apt-get install -y curl unzip && \
+# ✅ curl en unzip installeren zodat bun werkt, openssl voor token generation
+RUN apt-get update && apt-get install -y curl unzip openssl && \
     curl -fsSL https://bun.sh/install | bash && \
     corepack enable && \
     apt-get clean && rm -rf /var/lib/apt/lists/*

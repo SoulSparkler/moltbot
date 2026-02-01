@@ -13,8 +13,16 @@ export HOME=/data
 # Use PORT env var from Railway if set, otherwise default to 8080
 : "${OPENCLAW_GATEWAY_PORT:=${PORT:-8080}}"
 
+# Generate a random auth token if binding to LAN and no token is configured
+if [ "${OPENCLAW_GATEWAY_BIND}" != "loopback" ] && [ -z "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
+  OPENCLAW_GATEWAY_TOKEN=$(openssl rand -hex 32)
+fi
+
 export OPENCLAW_GATEWAY_BIND
 export OPENCLAW_GATEWAY_PORT
+if [ -n "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
+  export OPENCLAW_GATEWAY_TOKEN
+fi
 
 # Create directories
 mkdir -p /data/.clawdbot /data/workspace 2>/dev/null || true
