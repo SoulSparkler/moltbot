@@ -24,5 +24,21 @@ export OPENCLAW_TRUSTED_PROXIES
 # Create directories
 mkdir -p /data/.clawdbot /data/workspace 2>/dev/null || true
 
+# Create default config if it doesn't exist or if OPENCLAW_RESET_CONFIG=1
+# This enables the gateway for Railway deployment with proper settings
+if [ ! -f "$OPENCLAW_CONFIG_PATH" ] || [ "${OPENCLAW_RESET_CONFIG:-}" = "1" ]; then
+  cat > "$OPENCLAW_CONFIG_PATH" << 'CONFIGEOF'
+{
+  "gateway": {
+    "mode": "local",
+    "controlUi": {
+      "dangerouslyDisableDeviceAuth": true
+    }
+  }
+}
+CONFIGEOF
+  echo "Created default config at $OPENCLAW_CONFIG_PATH"
+fi
+
 # Run the entrypoint command
 exec "$@"
