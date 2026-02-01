@@ -16,5 +16,11 @@
       "mountPath": "/data",
       "sizeGB": 1
     }
-  ]
+  ],
+  "variables": {
+    "PORT": "8080",
+    "OPENCLAW_STATE_DIR": "/data/.openclaw",
+    "OPENCLAW_WORKSPACE_DIR": "/data/workspace",
+    "OPENCLAW_TRUSTED_PROXIES": "0.0.0.0/0"
+  }
 }
