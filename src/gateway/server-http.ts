@@ -241,7 +241,9 @@ export function createGatewayHttpServer(opts: {
     if (String(req.headers.upgrade ?? "").toLowerCase() === "websocket") return;
 
     // Health check endpoint for Railway
-    if (req.url === "/health" && req.method === "GET") {
+    // Extract pathname (without query string or fragment)
+    const pathname = (req.url ?? "/").split("?")[0];
+    if ((pathname === "/health" || pathname === "/health/") && req.method === "GET") {
       // Check if state directory is writable (critical for Railway)
       const stateDir = process.env.CLAWDBOT_STATE_DIR || process.env.MOLTBOT_STATE_DIR;
       if (stateDir) {
