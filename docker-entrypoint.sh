@@ -13,8 +13,13 @@ export HOME=/data
 # Use PORT env var from Railway if set, otherwise default to 8080
 : "${OPENCLAW_GATEWAY_PORT:=${PORT:-8080}}"
 
+# Trust all proxies for Railway's reverse proxy layer
+# Railway sits behind a load balancer so we need to trust proxy headers
+: "${OPENCLAW_TRUSTED_PROXIES:=0.0.0.0/0}"
+
 export OPENCLAW_GATEWAY_BIND
 export OPENCLAW_GATEWAY_PORT
+export OPENCLAW_TRUSTED_PROXIES
 
 # Create directories
 mkdir -p /data/.clawdbot /data/workspace 2>/dev/null || true
