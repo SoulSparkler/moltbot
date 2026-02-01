@@ -16,6 +16,12 @@ export HOME=/data
 # Generate a random auth token if binding to LAN and no token is configured
 if [ "${OPENCLAW_GATEWAY_BIND}" != "loopback" ] && [ -z "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
   OPENCLAW_GATEWAY_TOKEN=$(openssl rand -hex 32)
+  echo "=========================================="
+  echo "⚠️  GATEWAY AUTH TOKEN (for Control UI)"
+  echo "=========================================="
+  echo "Token: ${OPENCLAW_GATEWAY_TOKEN}"
+  echo "Paste this token in Control UI settings or use: jannetje.up.railway.app?token=${OPENCLAW_GATEWAY_TOKEN}"
+  echo "=========================================="
 fi
 
 export OPENCLAW_GATEWAY_BIND
