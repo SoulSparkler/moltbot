@@ -69,6 +69,6 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 ENTRYPOINT ["docker-entrypoint.sh"]
 
 # Default: start the gateway
-# Uses OPENCLAW_GATEWAY_PORT env var, --bind lan ensures 0.0.0.0 binding for Railway
+# Uses OPENCLAW_GATEWAY_PORT env var, --host 0.0.0.0 ensures all-interface binding for Railway
 # --allow-unconfigured allows starting without initial config
-CMD ["node", "openclaw.mjs", "gateway", "run", "--bind", "lan", "--allow-unconfigured"]
+CMD ["node", "openclaw.mjs", "gateway", "run", "--host", "0.0.0.0", "--allow-unconfigured"]
