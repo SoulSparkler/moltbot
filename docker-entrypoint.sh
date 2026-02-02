@@ -32,20 +32,20 @@ if [ -z "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
     fi
 fi
 
-echo "[entrypoint] Token set: ${OPENCLAW_GATEWAY_TOKEN:0:8}..."
-echo "[entrypoint] Starting gateway with bind=lan"
+echo "[entrypoint] Token: ${OPENCLAW_GATEWAY_TOKEN:0:8}..."
+echo "[entrypoint] Port: $OPENCLAW_GATEWAY_PORT"
 
-# Check if there's a persisted config that might override bind mode
-if [ -f "$OPENCLAW_CONFIG_PATH" ]; then
-    echo "[entrypoint] Config file exists at $OPENCLAW_CONFIG_PATH"
-    PERSISTED_BIND=$(node -e "try{const c=JSON.parse(require('fs').readFileSync('$OPENCLAW_CONFIG_PATH','utf8'));console.log(c.gateway?.bind||'(not set)')}catch(e){console.log('(read error)')}" 2>/dev/null || echo "(error)")
-    echo "[entrypoint] Persisted gateway.bind: $PERSISTED_BIND"
-else
-    echo "[entrypoint] No config file at $OPENCLAW_CONFIG_PATH"
+# If first arg is "gateway", run it directly with our configured options
+if [ "${1:-}" = "gateway" ] || [ "${1:-}" = "node" ]; then
+    echo "[entrypoint] Running gateway with explicit bind=lan and token"
+    exec node /app/openclaw.mjs gateway run \
+        --bind lan \
+        --token "$OPENCLAW_GATEWAY_TOKEN" \
+        --port "$OPENCLAW_GATEWAY_PORT" \
+        --allow-unconfigured \
+        --verbose
 fi
 
-# Debug: show the actual command being run
-echo "[entrypoint] Command: $@"
-
-# Run the entrypoint command
+# Otherwise run whatever was passed
+echo "[entrypoint] Running: $@"
 exec "$@"
