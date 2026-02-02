@@ -38,5 +38,22 @@ export PLAYWRIGHT_DOWNLOADS_PATH=/data/playwright-downloads
 # Create directories
 mkdir -p /data/.openclaw /data/.clawdbot /data/workspace 2>/dev/null || true
 
+# Create initial config with LAN binding if config doesn't exist
+if [ ! -f "${OPENCLAW_CONFIG_PATH}" ]; then
+  mkdir -p "$(dirname "${OPENCLAW_CONFIG_PATH}")"
+  cat > "${OPENCLAW_CONFIG_PATH}" <<'CONFIG_EOF'
+{
+  "gateway": {
+    "mode": "local",
+    "bind": "lan",
+    "auth": {
+      "mode": "token"
+    }
+  }
+}
+CONFIG_EOF
+  echo "Created initial config with gateway.bind=lan" >&2
+fi
+
 # Run the entrypoint command
 exec "$@"
