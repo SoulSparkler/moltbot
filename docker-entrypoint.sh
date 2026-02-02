@@ -16,6 +16,13 @@ export HOME=/data
 export OPENCLAW_GATEWAY_BIND
 export OPENCLAW_GATEWAY_PORT
 
+# Gateway requires auth when binding to 0.0.0.0 (non-loopback)
+# Generate a random token if not provided (for Railway)
+if [ -z "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
+  export OPENCLAW_GATEWAY_TOKEN="railway-$(node -e 'console.log(require("crypto").randomBytes(32).toString("hex"))')"
+  echo "Generated gateway token for Railway deployment" >&2
+fi
+
 # Playwright configuration for headless Railway operation
 export PLAYWRIGHT_BROWSERS_PATH=/data/playwright-browsers
 export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=true
