@@ -16,6 +16,15 @@ export HOME=/data
 export OPENCLAW_GATEWAY_BIND
 export OPENCLAW_GATEWAY_PORT
 
+# Playwright configuration for headless Railway operation
+export PLAYWRIGHT_BROWSERS_PATH=/data/playwright-browsers
+export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=true
+# Persistent sessions directory
+: "${PLAYWRIGHT_CLI_SESSION_DIR:=/data/playwright-sessions}"
+export PLAYWRIGHT_CLI_SESSION_DIR
+# Downloads directory
+export PLAYWRIGHT_DOWNLOADS_PATH=/data/playwright-downloads
+
 # Create directories
 mkdir -p /data/.clawdbot /data/workspace 2>/dev/null || true
 

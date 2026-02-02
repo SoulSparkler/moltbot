@@ -1,0 +1,38 @@
+{
+  "$schema": "https://playwright.dev/schemas/config.json",
+  "use": {
+    "browserName": "chromium",
+    "headless": true,
+    "viewport": {
+      "width": 1280,
+      "height": 720
+    },
+    "launchOptions": {
+      "args": [
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-setuid-sandbox",
+        "--disable-gpu",
+        "--disable-software-rasterizer",
+        "--disable-extensions",
+        "--no-first-run",
+        "--no-default-browser-check"
+      ],
+      "chromiumSandbox": false
+    },
+    "contextOptions": {
+      "acceptDownloads": true,
+      "ignoreHTTPSErrors": true
+    },
+    "screenshot": "only-on-failure",
+    "trace": "retain-on-failure",
+    "video": "retain-on-failure"
+  },
+  "outputDir": "/data/playwright-output",
+  "workers": 1,
+  "retries": 2,
+  "timeout": 60000,
+  "expect": {
+    "timeout": 10000
+  }
+}
