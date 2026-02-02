@@ -33,6 +33,7 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 ENTRYPOINT ["docker-entrypoint.sh"]
 
 # Default: start the gateway
-# Uses OPENCLAW_GATEWAY_PORT env var, --bind lan ensures 0.0.0.0 binding for Railway
+# --bind lan ensures 0.0.0.0 binding for Railway (requires auth token)
 # --allow-unconfigured allows starting without initial config
-CMD ["node", "openclaw.mjs", "gateway", "run", "--bind", "lan", "--allow-unconfigured"]
+# Token is passed explicitly from entrypoint-generated OPENCLAW_GATEWAY_TOKEN
+CMD ["sh", "-c", "node openclaw.mjs gateway run --bind lan --token \"$OPENCLAW_GATEWAY_TOKEN\" --allow-unconfigured"]
