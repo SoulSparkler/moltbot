@@ -4,6 +4,9 @@ set -euo pipefail
 # Force OpenClaw to use /data as HOME
 export HOME=/data
 
+# Set state directory explicitly for Railway
+export OPENCLAW_STATE_DIR=/data/.openclaw
+
 : "${OPENCLAW_CONFIG_PATH:=${HOME}/.clawdbot/openclaw.json}"
 
 # Railway requires binding to all interfaces (0.0.0.0)
@@ -33,7 +36,7 @@ export PLAYWRIGHT_CLI_SESSION_DIR
 export PLAYWRIGHT_DOWNLOADS_PATH=/data/playwright-downloads
 
 # Create directories
-mkdir -p /data/.clawdbot /data/workspace 2>/dev/null || true
+mkdir -p /data/.openclaw /data/.clawdbot /data/workspace 2>/dev/null || true
 
 # Run the entrypoint command
 exec "$@"
