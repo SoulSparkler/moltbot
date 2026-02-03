@@ -43,8 +43,8 @@ COPY . .
 RUN pnpm ui:install
 
 # Install Playwright and Chromium browser
-ENV PLAYWRIGHT_BROWSERS_PATH=/data/playwright-browsers
-RUN npx playwright install chromium
+ENV PLAYWRIGHT_BROWSERS_PATH=/app/playwright-browsers
+RUN pnpm add playwright && npx playwright install chromium
 
 # Build the TypeScript source code
 RUN pnpm build
