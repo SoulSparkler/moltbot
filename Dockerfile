@@ -1,10 +1,32 @@
 FROM node:22-bullseye-slim
 
-# ✅ curl en unzip installeren zodat bun werkt
-RUN apt-get update && apt-get install -y curl unzip && \
-    curl -fsSL https://bun.sh/install | bash && \
-    corepack enable && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+# Install system dependencies for Playwright/Chromium + bun
+RUN apt-get update && apt-get install -y \
+    curl \
+    unzip \
+    libnss3 \
+    libnspr4 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdrm2 \
+    libdbus-1-3 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxrandr2 \
+    libgbm1 \
+    libpango-1.0-0 \
+    libcairo2 \
+    libasound2 \
+    libatspi2.0-0 \
+    libxshmfence1 \
+    fonts-liberation \
+    fonts-noto-color-emoji \
+    && curl -fsSL https://bun.sh/install | bash \
+    && corepack enable \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -19,6 +41,10 @@ COPY . .
 
 # ✅ Skip alle build commando's die falen
 RUN pnpm ui:install
+
+# Install Playwright and Chromium browser
+ENV PLAYWRIGHT_BROWSERS_PATH=/data/playwright-browsers
+RUN npx playwright install chromium
 
 # Build the TypeScript source code
 RUN pnpm build
