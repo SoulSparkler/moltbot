@@ -1,7 +1,8 @@
 FROM node:22-bullseye-slim
 
-# Install system dependencies for Playwright/Chromium + bun
+# Install system dependencies for Playwright/Chromium + bun + git
 RUN apt-get update && apt-get install -y \
+    git \
     curl \
     unzip \
     libnss3 \
