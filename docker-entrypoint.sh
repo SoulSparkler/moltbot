@@ -88,6 +88,18 @@ cfg.browser.profiles.github = {
   headless: true
 };
 
+// Agent model config - OpenRouter auto routing with Haiku fallback
+cfg.agents = cfg.agents || {};
+cfg.agents.defaults = cfg.agents.defaults || {};
+cfg.agents.defaults.model = {
+  primary: 'openrouter/openrouter/auto',
+  fallbacks: ['openrouter/anthropic/claude-haiku-4.5']
+};
+cfg.agents.defaults.models = {
+  'openrouter/openrouter/auto': {},
+  'openrouter/anthropic/claude-haiku-4.5': {}
+};
+
 fs.mkdirSync(require('path').dirname(configPath), { recursive: true });
 fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2));
 console.log('[entrypoint] Config written');
