@@ -126,3 +126,4 @@ fi
 # Otherwise run whatever was passed
 echo "[entrypoint] Running: $@"
 exec "$@"
+# Railway deployment trigger - 20260203170111
