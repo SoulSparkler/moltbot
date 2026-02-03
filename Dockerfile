@@ -39,7 +39,7 @@ RUN pnpm install --frozen-lockfile
 # Source code kopiëren
 COPY . .
 
-# ✅ Skip alle build commando's die falen
+# Install UI dependencies
 RUN pnpm ui:install
 
 # Install Playwright and Chromium browser
@@ -53,7 +53,7 @@ RUN pnpm build
 RUN pnpm ui:build
 
 # Data folder maken
-RUN mkdir -p /data/.clawdbot
+RUN mkdir -p /data/.openclaw /data/browser-profiles
 
 # Entrypoint instellen
 COPY docker-entrypoint.sh /usr/local/bin/
