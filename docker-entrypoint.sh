@@ -56,37 +56,21 @@ cfg.gateway.auth.token = '$OPENCLAW_GATEWAY_TOKEN';
 // Remove invalid key from previous deployment
 delete cfg.gateway.customBindHost;
 
-// Browser profiles - persistent sessions on /data volume
+// Browser config - headless mode for Railway containers
 cfg.browser = cfg.browser || {};
+cfg.browser.enabled = true;
+cfg.browser.headless = true;
+cfg.browser.noSandbox = true;  // Required for Docker/Railway
+
+// Browser profiles - color is required, ports auto-assigned
 cfg.browser.profiles = cfg.browser.profiles || {};
-cfg.browser.profiles.main = {
-  userDataDir: '/data/browser-profiles/main',
-  headless: true
-};
-cfg.browser.profiles.google = {
-  userDataDir: '/data/browser-profiles/google',
-  headless: true
-};
-cfg.browser.profiles.facebook = {
-  userDataDir: '/data/browser-profiles/facebook',
-  headless: true
-};
-cfg.browser.profiles.instagram = {
-  userDataDir: '/data/browser-profiles/instagram',
-  headless: true
-};
-cfg.browser.profiles.linkedin = {
-  userDataDir: '/data/browser-profiles/linkedin',
-  headless: true
-};
-cfg.browser.profiles.tiktok = {
-  userDataDir: '/data/browser-profiles/tiktok',
-  headless: true
-};
-cfg.browser.profiles.github = {
-  userDataDir: '/data/browser-profiles/github',
-  headless: true
-};
+cfg.browser.profiles.main = { color: '#FF4500' };
+cfg.browser.profiles.google = { color: '#4285F4' };
+cfg.browser.profiles.facebook = { color: '#1877F2' };
+cfg.browser.profiles.instagram = { color: '#E4405F' };
+cfg.browser.profiles.linkedin = { color: '#0A66C2' };
+cfg.browser.profiles.tiktok = { color: '#000000' };
+cfg.browser.profiles.github = { color: '#181717' };
 
 // Agent model config - OpenRouter auto routing with Haiku fallback
 cfg.agents = cfg.agents || {};
