@@ -23,6 +23,9 @@ RUN pnpm ui:install
 # Build the TypeScript source code
 RUN pnpm build
 
+# Build the Control UI assets
+RUN pnpm ui:build
+
 # Data folder maken
 RUN mkdir -p /data/.clawdbot
 
