@@ -79,6 +79,14 @@ cfg.browser.profiles.linkedin = {
   userDataDir: '/data/browser-profiles/linkedin',
   headless: true
 };
+cfg.browser.profiles.tiktok = {
+  userDataDir: '/data/browser-profiles/tiktok',
+  headless: true
+};
+cfg.browser.profiles.github = {
+  userDataDir: '/data/browser-profiles/github',
+  headless: true
+};
 
 fs.mkdirSync(require('path').dirname(configPath), { recursive: true });
 fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2));
@@ -91,7 +99,9 @@ console.log('[entrypoint] Browser profiles:', Object.keys(cfg.browser.profiles).
              /data/browser-profiles/google \
              /data/browser-profiles/facebook \
              /data/browser-profiles/instagram \
-             /data/browser-profiles/linkedin
+             /data/browser-profiles/linkedin \
+             /data/browser-profiles/tiktok \
+             /data/browser-profiles/github
 
     exec node /app/openclaw.mjs gateway run \
         --bind lan \
