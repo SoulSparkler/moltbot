@@ -62,15 +62,15 @@ cfg.browser.enabled = true;
 cfg.browser.headless = true;
 cfg.browser.noSandbox = true;  // Required for Docker/Railway
 
-// Browser profiles - color is required, ports auto-assigned
+// Browser profiles - cdpPort is required, colors assigned
 cfg.browser.profiles = cfg.browser.profiles || {};
-cfg.browser.profiles.main = { color: '#FF4500' };
-cfg.browser.profiles.google = { color: '#4285F4' };
-cfg.browser.profiles.facebook = { color: '#1877F2' };
-cfg.browser.profiles.instagram = { color: '#E4405F' };
-cfg.browser.profiles.linkedin = { color: '#0A66C2' };
-cfg.browser.profiles.tiktok = { color: '#000000' };
-cfg.browser.profiles.github = { color: '#181717' };
+cfg.browser.profiles.main = { cdpPort: 18800, color: '#FF4500' };
+cfg.browser.profiles.google = { cdpPort: 18801, color: '#4285F4' };
+cfg.browser.profiles.facebook = { cdpPort: 18802, color: '#1877F2' };
+cfg.browser.profiles.instagram = { cdpPort: 18803, color: '#E4405F' };
+cfg.browser.profiles.linkedin = { cdpPort: 18804, color: '#0A66C2' };
+cfg.browser.profiles.tiktok = { cdpPort: 18805, color: '#000000' };
+cfg.browser.profiles.github = { cdpPort: 18806, color: '#181717' };
 
 // Agent model config - OpenRouter auto routing with Haiku fallback
 cfg.agents = cfg.agents || {};
