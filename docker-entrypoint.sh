@@ -39,13 +39,15 @@ echo "[entrypoint] Port: $OPENCLAW_GATEWAY_PORT"
 if [ "${1:-}" = "gateway" ] || [ "${1:-}" = "node" ]; then
     echo "[entrypoint] Running gateway with explicit bind=lan and token"
 
-    # Force bind mode in config
-    echo "[entrypoint] Writing gateway.bind=lan to config..."
+    # Force bind mode in config and set up browser profiles
+    echo "[entrypoint] Writing config with gateway.bind=lan and browser profiles..."
     node -e "
 const fs = require('fs');
 const configPath = '$OPENCLAW_CONFIG_PATH';
 let cfg = {};
 try { cfg = JSON.parse(fs.readFileSync(configPath, 'utf8')); } catch {}
+
+// Gateway config
 cfg.gateway = cfg.gateway || {};
 cfg.gateway.bind = 'lan';
 cfg.gateway.mode = 'local';
@@ -53,10 +55,43 @@ cfg.gateway.auth = cfg.gateway.auth || {};
 cfg.gateway.auth.token = '$OPENCLAW_GATEWAY_TOKEN';
 // Remove invalid key from previous deployment
 delete cfg.gateway.customBindHost;
+
+// Browser profiles - persistent sessions on /data volume
+cfg.browser = cfg.browser || {};
+cfg.browser.profiles = cfg.browser.profiles || {};
+cfg.browser.profiles.main = {
+  userDataDir: '/data/browser-profiles/main',
+  headless: true
+};
+cfg.browser.profiles.google = {
+  userDataDir: '/data/browser-profiles/google',
+  headless: true
+};
+cfg.browser.profiles.facebook = {
+  userDataDir: '/data/browser-profiles/facebook',
+  headless: true
+};
+cfg.browser.profiles.instagram = {
+  userDataDir: '/data/browser-profiles/instagram',
+  headless: true
+};
+cfg.browser.profiles.linkedin = {
+  userDataDir: '/data/browser-profiles/linkedin',
+  headless: true
+};
+
 fs.mkdirSync(require('path').dirname(configPath), { recursive: true });
 fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2));
-console.log('[entrypoint] Config written:', JSON.stringify(cfg.gateway, null, 2));
+console.log('[entrypoint] Config written');
+console.log('[entrypoint] Browser profiles:', Object.keys(cfg.browser.profiles).join(', '));
 "
+
+    # Create browser profile directories
+    mkdir -p /data/browser-profiles/main \
+             /data/browser-profiles/google \
+             /data/browser-profiles/facebook \
+             /data/browser-profiles/instagram \
+             /data/browser-profiles/linkedin
 
     exec node /app/openclaw.mjs gateway run \
         --bind lan \
