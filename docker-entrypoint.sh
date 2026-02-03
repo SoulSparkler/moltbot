@@ -38,6 +38,23 @@ echo "[entrypoint] Port: $OPENCLAW_GATEWAY_PORT"
 # If first arg is "gateway", run it directly with our configured options
 if [ "${1:-}" = "gateway" ] || [ "${1:-}" = "node" ]; then
     echo "[entrypoint] Running gateway with explicit bind=lan and token"
+
+    # Force customBindHost in config to bypass bind mode resolution
+    echo "[entrypoint] Writing customBindHost to config..."
+    node -e "
+const fs = require('fs');
+const configPath = '$OPENCLAW_CONFIG_PATH';
+let cfg = {};
+try { cfg = JSON.parse(fs.readFileSync(configPath, 'utf8')); } catch {}
+cfg.gateway = cfg.gateway || {};
+cfg.gateway.customBindHost = '0.0.0.0';
+cfg.gateway.auth = cfg.gateway.auth || {};
+cfg.gateway.auth.token = '$OPENCLAW_GATEWAY_TOKEN';
+fs.mkdirSync(require('path').dirname(configPath), { recursive: true });
+fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2));
+console.log('[entrypoint] Config written:', JSON.stringify(cfg.gateway, null, 2));
+"
+
     exec node /app/openclaw.mjs gateway run \
         --bind lan \
         --token "$OPENCLAW_GATEWAY_TOKEN" \
