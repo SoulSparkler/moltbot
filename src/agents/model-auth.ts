@@ -4,6 +4,7 @@ import type { OpenClawConfig } from "../config/config.js";
 import type { ModelProviderAuthMode, ModelProviderConfig } from "../config/types.js";
 import { formatCliCommand } from "../cli/command-format.js";
 import { getShellEnvAppliedKeys } from "../infra/shell-env.js";
+import { resolveOpenClawAgentDir } from "./agent-paths.js";
 import {
   type AuthProfileStore,
   ensureAuthProfileStore,
@@ -20,6 +21,33 @@ const AWS_BEARER_ENV = "AWS_BEARER_TOKEN_BEDROCK";
 const AWS_ACCESS_KEY_ENV = "AWS_ACCESS_KEY_ID";
 const AWS_SECRET_KEY_ENV = "AWS_SECRET_ACCESS_KEY";
 const AWS_PROFILE_ENV = "AWS_PROFILE";
+
+/**
+ * Determine if a given agent directory is the main/default agent.
+ * The main agent is the one at ~/.openclaw/agents/main/agent (or the override path).
+ */
+function isMainAgent(agentDir?: string): boolean {
+  // If agentDir is provided, resolve it directly
+  const resolvedAgentDir = agentDir
+    ? path.resolve(agentDir)
+    : path.resolve(resolveOpenClawAgentDir());
+  // Get the main agent dir without using any agentDir override
+  const previousOverride = process.env.OPENCLAW_AGENT_DIR;
+  const previousPiOverride = process.env.PI_CODING_AGENT_DIR;
+  try {
+    delete process.env.OPENCLAW_AGENT_DIR;
+    delete process.env.PI_CODING_AGENT_DIR;
+    const mainAgentDir = path.resolve(resolveOpenClawAgentDir());
+    return resolvedAgentDir === mainAgentDir;
+  } finally {
+    if (previousOverride) {
+      process.env.OPENCLAW_AGENT_DIR = previousOverride;
+    }
+    if (previousPiOverride) {
+      process.env.PI_CODING_AGENT_DIR = previousPiOverride;
+    }
+  }
+}
 
 function resolveProviderConfig(
   cfg: OpenClawConfig | undefined,
@@ -220,13 +248,21 @@ export async function resolveApiKeyForProvider(params: {
 
   const authStorePath = resolveAuthStorePathForDisplay(params.agentDir);
   const resolvedAgentDir = path.dirname(authStorePath);
-  throw new Error(
-    [
-      `No API key found for provider "${provider}".`,
-      `Auth store: ${authStorePath} (agentDir: ${resolvedAgentDir}).`,
-      `Configure auth for this agent (${formatCliCommand("openclaw agents add <id>")}) or copy auth-profiles.json from the main agentDir.`,
-    ].join(" "),
-  );
+  const main = isMainAgent(params.agentDir);
+
+  const message = main
+    ? [
+        `No API key found for provider "${provider}".`,
+        `Auth store: ${authStorePath}.`,
+        `Configure auth using ${formatCliCommand("openclaw auth add")} or set the env var (e.g., OPENAI_API_KEY for OpenAI).`,
+      ].join(" ")
+    : [
+        `No API key found for provider "${provider}".`,
+        `Auth store: ${authStorePath} (agentDir: ${resolvedAgentDir}).`,
+        `Copy auth-profiles.json from the main agentDir or configure auth for this agent (${formatCliCommand("openclaw agents add <id>")}).`,
+      ].join(" ");
+
+  throw new Error(message);
 }
 
 export type EnvApiKeyResult = { apiKey: string; source: string };
