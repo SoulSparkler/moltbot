@@ -51,6 +51,8 @@ cfg.gateway.bind = 'lan';
 cfg.gateway.mode = 'local';
 cfg.gateway.auth = cfg.gateway.auth || {};
 cfg.gateway.auth.token = '$OPENCLAW_GATEWAY_TOKEN';
+// Remove invalid key from previous deployment
+delete cfg.gateway.customBindHost;
 fs.mkdirSync(require('path').dirname(configPath), { recursive: true });
 fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2));
 console.log('[entrypoint] Config written:', JSON.stringify(cfg.gateway, null, 2));
