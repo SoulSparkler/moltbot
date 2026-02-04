@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+echo "[entrypoint] Starting OpenClaw gateway entrypoint..."
+
 # Force OpenClaw to use /data as HOME
 export HOME=/data
 
