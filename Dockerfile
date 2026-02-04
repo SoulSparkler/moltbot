@@ -57,9 +57,12 @@ RUN pnpm ui:install
 # Build the TypeScript source code
 RUN pnpm build
 
-# Install Chromium browser for Playwright (playwright-core is already in dependencies)
+# Install Chromium browser for Playwright
+# Note: playwright-core doesn't include the install CLI, so we temporarily add playwright
 ENV PLAYWRIGHT_BROWSERS_PATH=/data/playwright-browsers
-RUN npx playwright install --with-deps chromium
+RUN pnpm add -D -w playwright && \
+    npx playwright install --with-deps chromium && \
+    pnpm remove -w playwright
 
 # Data folder maken
 RUN mkdir -p /data/.clawdbot
