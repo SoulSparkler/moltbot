@@ -15,6 +15,16 @@ export OPENCLAW_GATEWAY_PORT
 # Create directories
 mkdir -p /data/.openclaw /data/workspace 2>/dev/null || true
 
+# Find Playwright Chromium executable
+PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-/app/playwright-browsers}"
+CHROMIUM_EXE=$(find "$PLAYWRIGHT_BROWSERS_PATH" -name "chrome" -type f -path "*/chrome-linux/*" 2>/dev/null | head -1)
+if [ -n "$CHROMIUM_EXE" ]; then
+    echo "[entrypoint] Found Playwright Chromium at: $CHROMIUM_EXE"
+    export CHROMIUM_EXE
+else
+    echo "[entrypoint] WARNING: Playwright Chromium not found at $PLAYWRIGHT_BROWSERS_PATH"
+fi
+
 # Generate a gateway token if not already set (required for non-loopback binding)
 if [ -z "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
     # Check if we have a persisted token in config
@@ -61,6 +71,13 @@ cfg.browser = cfg.browser || {};
 cfg.browser.enabled = true;
 cfg.browser.headless = true;
 cfg.browser.noSandbox = true;  // Required for Docker/Railway
+
+// Set Playwright Chromium executable path
+const chromiumExe = process.env.CHROMIUM_EXE;
+if (chromiumExe) {
+  cfg.browser.executablePath = chromiumExe;
+  console.log('[entrypoint] Browser executable:', chromiumExe);
+}
 
 // Browser profiles - cdpPort is required, colors assigned
 cfg.browser.profiles = cfg.browser.profiles || {};
