@@ -4,7 +4,8 @@ FROM node:22-bullseye-slim
 # - curl, unzip: required for bun installation
 # - gnupg: required for 1Password CLI GPG key verification
 # - tmux: required for isolated credential operations
-# - git, make, build-essential: required for building native node modules (node-llama-cpp, sharp, etc.)
+# - git, make, cmake, build-essential: required for building native node modules (node-llama-cpp, sharp, etc.)
+# - python3: required for node-gyp
 # - 1password-cli: secure credential management
 RUN apt-get update && apt-get install -y \
     curl \
@@ -13,6 +14,7 @@ RUN apt-get update && apt-get install -y \
     tmux \
     git \
     make \
+    cmake \
     build-essential \
     python3 && \
     curl -fsSL https://bun.sh/install | bash && \
