@@ -1,9 +1,20 @@
 FROM node:22-bullseye-slim
 
-# ✅ curl en unzip installeren zodat bun werkt
-# Install 1Password CLI for secure credential management
-# Install tmux for isolated credential operations
-RUN apt-get update && apt-get install -y curl unzip gnupg tmux && \
+# Install system dependencies:
+# - curl, unzip: required for bun installation
+# - gnupg: required for 1Password CLI GPG key verification
+# - tmux: required for isolated credential operations
+# - git, make, build-essential: required for building native node modules (node-llama-cpp, sharp, etc.)
+# - 1password-cli: secure credential management
+RUN apt-get update && apt-get install -y \
+    curl \
+    unzip \
+    gnupg \
+    tmux \
+    git \
+    make \
+    build-essential \
+    python3 && \
     curl -fsSL https://bun.sh/install | bash && \
     corepack enable && \
     curl -sS https://downloads.1password.com/linux/keys/1password.asc | gpg --dearmor --output /usr/share/keyrings/1password-archive-keyring.gpg && \
