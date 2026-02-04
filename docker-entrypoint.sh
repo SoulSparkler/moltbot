@@ -5,21 +5,29 @@ echo "[entrypoint] Starting OpenClaw gateway entrypoint..."
 
 # Force OpenClaw to use /data as HOME
 export HOME=/data
+echo "[entrypoint] HOME=$HOME"
 
 # Config path follows OpenClaw convention: ~/.openclaw/openclaw.json
 : "${OPENCLAW_CONFIG_PATH:=${HOME}/.openclaw/openclaw.json}"
 export OPENCLAW_CONFIG_PATH
+echo "[entrypoint] Config path: $OPENCLAW_CONFIG_PATH"
 
 # Use PORT env var from Railway if set, otherwise default to 8080
 : "${OPENCLAW_GATEWAY_PORT:=${PORT:-8080}}"
 export OPENCLAW_GATEWAY_PORT
+echo "[entrypoint] Port: $OPENCLAW_GATEWAY_PORT"
 
 # Create directories
+echo "[entrypoint] Creating directories..."
 mkdir -p /data/.openclaw /data/workspace 2>/dev/null || true
+echo "[entrypoint] Directories created"
 
 # Find Playwright Chromium executable
+echo "[entrypoint] Looking for Playwright Chromium..."
 PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-/app/playwright-browsers}"
-CHROMIUM_EXE=$(find "$PLAYWRIGHT_BROWSERS_PATH" -name "chrome" -type f -path "*/chrome-linux/*" 2>/dev/null | head -1)
+echo "[entrypoint] PLAYWRIGHT_BROWSERS_PATH=$PLAYWRIGHT_BROWSERS_PATH"
+ls -la "$PLAYWRIGHT_BROWSERS_PATH" 2>/dev/null || echo "[entrypoint] Cannot list $PLAYWRIGHT_BROWSERS_PATH"
+CHROMIUM_EXE=$(find "$PLAYWRIGHT_BROWSERS_PATH" -name "chrome" -type f -path "*/chrome-linux/*" 2>/dev/null | head -1 || true)
 if [ -n "$CHROMIUM_EXE" ]; then
     echo "[entrypoint] Found Playwright Chromium at: $CHROMIUM_EXE"
     export CHROMIUM_EXE
