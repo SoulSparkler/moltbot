@@ -51,19 +51,31 @@ if [ "${1:-}" = "gateway" ] || [ "${1:-}" = "node" ]; then
 
     # Force bind mode in config and set up browser profiles
     echo "[entrypoint] Writing config with gateway.bind=lan and browser profiles..."
-    node -e "
+    node - <<'NODE'
 const fs = require('fs');
-const configPath = '$OPENCLAW_CONFIG_PATH';
+const path = require('path');
+
+const configPath = process.env.OPENCLAW_CONFIG_PATH;
+if (!configPath) {
+  throw new Error('Missing OPENCLAW_CONFIG_PATH');
+}
+
 const dataDir = process.env.OPENCLAW_DATA_DIR || '/data';
+const gatewayToken = process.env.OPENCLAW_GATEWAY_TOKEN || '';
+
 let cfg = {};
-try { cfg = JSON.parse(fs.readFileSync(configPath, 'utf8')); } catch {}
+try {
+  cfg = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+} catch {
+  cfg = {};
+}
 
 // Gateway config
 cfg.gateway = cfg.gateway || {};
 cfg.gateway.bind = 'lan';
 cfg.gateway.mode = 'local';
 cfg.gateway.auth = cfg.gateway.auth || {};
-cfg.gateway.auth.token = '$OPENCLAW_GATEWAY_TOKEN';
+cfg.gateway.auth.token = gatewayToken;
 // Remove invalid key from previous deployment
 delete cfg.gateway.customBindHost;
 
@@ -117,11 +129,11 @@ cfg.agents.defaults.models = {
 cfg.agents.defaults.replyPipeline = cfg.agents.defaults.replyPipeline || {};
 cfg.agents.defaults.replyPipeline.enabled = true;
 
-fs.mkdirSync(require('path').dirname(configPath), { recursive: true });
+fs.mkdirSync(path.dirname(configPath), { recursive: true });
 fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2));
 console.log('[entrypoint] Config written');
 console.log('[entrypoint] Browser profiles:', Object.keys(cfg.browser.profiles).join(', '));
-"
+NODE
 
     # Create browser profile directories
     mkdir -p "$OPENCLAW_DATA_DIR/browser-profiles/main" \
