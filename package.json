@@ -220,8 +220,7 @@
     "vitest": "^4.0.18"
   },
   "peerDependencies": {
-    "@napi-rs/canvas": "^0.1.89",
-    "node-llama-cpp": "3.15.1"
+    "@napi-rs/canvas": "^0.1.89"
   },
   "overrides": {
     "tar": "7.5.7"
@@ -250,7 +249,6 @@
       "@whiskeysockets/baileys",
       "authenticate-pam",
       "esbuild",
-      "node-llama-cpp",
       "protobufjs",
       "sharp"
     ]
