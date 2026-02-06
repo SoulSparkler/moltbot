@@ -255,12 +255,21 @@ export function createGatewayHttpServer(opts: {
           await fs.promises.writeFile(testFile, "test");
           await fs.promises.unlink(testFile);
         } catch (err) {
-          res.statusCode = 503;
+          // Railway uses this endpoint to decide whether to route traffic. If storage isn't writable,
+          // we still prefer being "up" (often with an entrypoint fallback to /tmp) over a hard 503.
+          // Log details for debugging, but return 200 so the app can be reached.
+          // eslint-disable-next-line no-console
+          console.warn("[health] state directory not writable", {
+            stateDir,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          res.statusCode = 200;
           res.setHeader("Content-Type", "application/json");
           res.end(
             JSON.stringify({
-              status: "error",
-              message: "State directory is not writable. Ensure volume is mounted at /data",
+              status: "warn",
+              message:
+                "State directory is not writable. The gateway may be using ephemeral storage; check volume mount.",
               stateDir,
             }),
           );
