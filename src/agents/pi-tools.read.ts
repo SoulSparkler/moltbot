@@ -1,6 +1,8 @@
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import { createEditTool, createReadTool, createWriteTool } from "@mariozechner/pi-coding-agent";
-import type { AnyAgentTool } from "./pi-tools.types.js";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { createSubsystemLogger } from "../logging/subsystem.js";
 import { detectMime } from "../media/mime.js";
 import { assertSandboxPath } from "./sandbox-paths.js";
 import { sanitizeToolResultImages } from "./tool-images.js";
@@ -10,6 +12,8 @@ import { sanitizeToolResultImages } from "./tool-images.js";
 type ToolContentBlock = AgentToolResult<unknown>["content"][number];
 type ImageContentBlock = Extract<ToolContentBlock, { type: "image" }>;
 type TextContentBlock = Extract<ToolContentBlock, { type: "text" }>;
+
+const editLog = createSubsystemLogger("agents/tools");
 
 async function sniffMimeFromBase64(base64: string): Promise<string | undefined> {
   const trimmed = base64.trim();
@@ -148,6 +152,61 @@ export function normalizeToolParams(params: unknown): Record<string, unknown> | 
   return normalized;
 }
 
+function escapeRegex(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function buildWhitespaceFlexibleRegex(text: string): RegExp | null {
+  const normalized = text.replace(/\r\n/g, "\n").trim();
+  if (!normalized) {
+    return null;
+  }
+  const pattern = escapeRegex(normalized).replace(/\\s+/g, "\\s+").replace(/\s+/g, "\\s+");
+  return new RegExp(pattern, "ms");
+}
+
+async function applyEditFallback(args: {
+  path: string;
+  oldText: string;
+  newText: string;
+  root: string;
+}): Promise<{ applied: boolean; method?: string; message?: string }> {
+  const resolved = path.isAbsolute(args.path) ? args.path : path.resolve(args.root, args.path);
+  const original = await fs.readFile(resolved, "utf8");
+  const flexibleRegex = buildWhitespaceFlexibleRegex(args.oldText);
+
+  if (flexibleRegex) {
+    const match = flexibleRegex.exec(original);
+    if (match && match.index !== undefined) {
+      const replaced =
+        original.slice(0, match.index) +
+        args.newText +
+        original.slice(match.index + match[0].length);
+      if (replaced !== original) {
+        await fs.writeFile(resolved, replaced, "utf8");
+        return {
+          applied: true,
+          method: "whitespace-flex",
+          message: "Applied whitespace-tolerant replace",
+        };
+      }
+    }
+  }
+
+  // Final fallback: normalized line endings direct replace.
+  const normalizedOriginal = original.replace(/\r\n/g, "\n");
+  const normalizedOld = args.oldText.replace(/\r\n/g, "\n");
+  if (normalizedOriginal.includes(normalizedOld)) {
+    const replaced = normalizedOriginal.replace(normalizedOld, args.newText.replace(/\r\n/g, "\n"));
+    if (replaced !== normalizedOriginal) {
+      await fs.writeFile(resolved, replaced, "utf8");
+      return { applied: true, method: "normalized-rewrite", message: "Applied normalized rewrite" };
+    }
+  }
+
+  return { applied: false, message: "oldText not found with fallback strategies" };
+}
+
 export function patchToolSchemaForClaudeCompatibility(tool: AnyAgentTool): AnyAgentTool {
   const schema =
     tool.parameters && typeof tool.parameters === "object"
@@ -279,8 +338,8 @@ export function createSandboxedWriteTool(root: string) {
 }
 
 export function createSandboxedEditTool(root: string) {
-  const base = createEditTool(root) as unknown as AnyAgentTool;
-  return wrapSandboxPathGuard(wrapToolParamNormalization(base, CLAUDE_PARAM_GROUPS.edit), root);
+  const base = createResilientEditTool(root);
+  return wrapSandboxPathGuard(base, root);
 }
 
 export function createOpenClawReadTool(base: AnyAgentTool): AnyAgentTool {
@@ -297,6 +356,74 @@ export function createOpenClawReadTool(base: AnyAgentTool): AnyAgentTool {
       const filePath = typeof record?.path === "string" ? String(record.path) : "<unknown>";
       const normalizedResult = await normalizeReadImageResult(result, filePath);
       return sanitizeToolResultImages(normalizedResult, `read:${filePath}`);
+    },
+  };
+}
+
+export function createResilientEditTool(root: string): AnyAgentTool {
+  const base = wrapToolParamNormalization(
+    createEditTool(root) as unknown as AnyAgentTool,
+    CLAUDE_PARAM_GROUPS.edit,
+  );
+
+  return {
+    ...base,
+    execute: async (toolCallId, params, signal, onUpdate) => {
+      const normalized = normalizeToolParams(params);
+      const record =
+        normalized ??
+        (params && typeof params === "object" ? (params as Record<string, unknown>) : undefined);
+
+      assertRequiredParams(record, CLAUDE_PARAM_GROUPS.edit, base.name);
+
+      try {
+        const result = await base.execute(toolCallId, normalized ?? params, signal, onUpdate);
+        const pathValue = typeof record?.path === "string" ? record.path : "<unknown>";
+        editLog.debug(`[edit] method=direct path=${pathValue}`);
+        return result;
+      } catch (error) {
+        if (signal?.aborted) {
+          throw error;
+        }
+        const pathValue = typeof record?.path === "string" ? record.path : "";
+        const oldText = typeof record?.oldText === "string" ? record.oldText : "";
+        const newText = typeof record?.newText === "string" ? record.newText : "";
+
+        if (!pathValue || !oldText) {
+          throw error;
+        }
+
+        editLog.warn(
+          `[edit] method=direct failed; attempting fallback path=${pathValue} error=${String(error)}`,
+        );
+
+        const fallback = await applyEditFallback({
+          path: pathValue,
+          oldText,
+          newText,
+          root,
+        });
+
+        if (fallback.applied) {
+          editLog.info(
+            `[edit] fallback applied method=${fallback.method ?? "unknown"} path=${pathValue}`,
+          );
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Applied edit fallback (${fallback.method ?? "fallback"}) to ${pathValue}.`,
+              },
+            ],
+            details: { method: fallback.method ?? "fallback" },
+          };
+        }
+
+        editLog.warn(
+          `[edit] fallback failed path=${pathValue} message=${fallback.message ?? "unknown"}`,
+        );
+        throw error;
+      }
     },
   };
 }

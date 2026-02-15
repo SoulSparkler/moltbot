@@ -55,9 +55,8 @@ export async function handleToolExecutionStart(
     const record = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
     const filePath = typeof record.path === "string" ? record.path.trim() : "";
     if (!filePath) {
-      const argsPreview = typeof args === "string" ? args.slice(0, 200) : undefined;
-      ctx.log.warn(
-        `read tool called without path: toolCallId=${toolCallId} argsType=${typeof args}${argsPreview ? ` argsPreview=${argsPreview}` : ""}`,
+      throw new Error(
+        "read tool requires a path. Provide path or file_path with a non-empty value before calling read.",
       );
     }
   }

@@ -1,6 +1,5 @@
 import {
   codingTools,
-  createEditTool,
   createReadTool,
   createWriteTool,
   readTool,
@@ -35,6 +34,7 @@ import {
   assertRequiredParams,
   CLAUDE_PARAM_GROUPS,
   createOpenClawReadTool,
+  createResilientEditTool,
   createSandboxedEditTool,
   createSandboxedReadTool,
   createSandboxedWriteTool,
@@ -267,7 +267,7 @@ export function createOpenClawCodingTools(options?: {
         return [];
       }
       // Wrap with param normalization for Claude Code compatibility
-      return [wrapToolParamNormalization(createEditTool(workspaceRoot), CLAUDE_PARAM_GROUPS.edit)];
+      return [createResilientEditTool(workspaceRoot)];
     }
     return [tool];
   });
