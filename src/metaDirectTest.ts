@@ -7,10 +7,7 @@ export async function runMetaDirectTest() {
     return;
   }
 
-  console.log("META TEST: Token fingerprint:", token.slice(0, 8) + "..." + token.slice(-6));
-  console.log("META TEST: Token length:", token.length);
-  console.log("META TEST: Contains newline:", /[\r\n]/.test(token));
-  console.log("META TEST: Contains whitespace:", /\s/.test(token));
+  console.log("META TEST: Running page access check");
 
   try {
     const response = await fetch(`https://graph.facebook.com/v18.0/${pageId}?fields=id,name`, {

@@ -147,6 +147,13 @@ You can add custom commands to the menu via config:
 }
 ```
 
+Meta diagnostics commands:
+
+- `/meta_status`: calls `GET https://graph.facebook.com/v18.0/{META_PAGE_ID}?fields=id,name` with `Authorization: Bearer META_ACCESS_TOKEN` and reports status diagnostics.
+- `/meta_debug` (admin-only): calls `GET https://graph.facebook.com/v18.0/debug_token?input_token={META_ACCESS_TOKEN}&access_token={META_APP_ID}|{META_APP_SECRET}` and returns only `is_valid`, `token_type`, `expires_at`, `app_id`, and `scopes`.
+- Required env vars: `META_PAGE_ID`, `META_ACCESS_TOKEN`, `META_APP_ID`, `META_APP_SECRET`.
+- Use a Business Manager **System User** token for `META_ACCESS_TOKEN` (recommended for stable server-side access).
+
 ## Setup troubleshooting (commands)
 
 - `setMyCommands failed` in logs usually means outbound HTTPS/DNS is blocked to `api.telegram.org`.

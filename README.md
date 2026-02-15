@@ -353,6 +353,13 @@ Details: [Security guide](https://docs.openclaw.ai/gateway/security) · [Docker 
 }
 ```
 
+Meta diagnostics (Telegram native commands):
+
+- `/meta_status` checks `GET /v18.0/{META_PAGE_ID}?fields=id,name` using `META_ACCESS_TOKEN`.
+- `/meta_debug` (admin-only) checks `GET /v18.0/debug_token` and returns only `is_valid`, `token_type`, `expires_at`, `app_id`, and `scopes`.
+- Required env vars: `META_PAGE_ID`, `META_ACCESS_TOKEN`, `META_APP_ID`, `META_APP_SECRET`.
+- For `META_ACCESS_TOKEN`, use a **Business Manager System User token** (recommended), not a short-lived user token.
+
 ### [Slack](https://docs.openclaw.ai/channels/slack)
 
 - Set `SLACK_BOT_TOKEN` + `SLACK_APP_TOKEN` (or `channels.slack.botToken` + `channels.slack.appToken`).

@@ -57,6 +57,19 @@ import {
 import { buildInlineKeyboard } from "./send.js";
 
 const EMPTY_RESPONSE_FALLBACK = "No response generated. Please try again.";
+const META_GRAPH_API_BASE = "https://graph.facebook.com/v18.0";
+const META_STATUS_COMMAND = "meta_status";
+const META_DEBUG_COMMAND = "meta_debug";
+const TELEGRAM_META_NATIVE_COMMANDS = [
+  {
+    command: META_STATUS_COMMAND,
+    description: "Check Meta page token access status.",
+  },
+  {
+    command: META_DEBUG_COMMAND,
+    description: "Debug Meta access token details (admin only).",
+  },
+] as const;
 
 type TelegramNativeCommandContext = Context & { match?: string };
 
@@ -71,6 +84,275 @@ type TelegramCommandAuthResult = {
   topicConfig?: TelegramTopicConfig;
   commandAuthorized: boolean;
 };
+
+type MetaGraphFetchResult = {
+  status: number;
+  ok: boolean;
+  body: Record<string, unknown> | null;
+  text: string;
+};
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function toStringValue(value: unknown): string | null {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+  if (typeof value === "bigint") {
+    return String(value);
+  }
+  return null;
+}
+
+function toBooleanValue(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+function extractMetaGraphError(
+  body: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  return asRecord(body?.error);
+}
+
+async function fetchMetaGraphJson(params: {
+  url: string;
+  headers?: HeadersInit;
+}): Promise<MetaGraphFetchResult> {
+  const response = await fetch(params.url, {
+    method: "GET",
+    headers: params.headers,
+  });
+  const text = await response.text();
+  let body: Record<string, unknown> | null = null;
+  if (text.trim()) {
+    try {
+      body = asRecord(JSON.parse(text));
+    } catch {
+      body = null;
+    }
+  }
+  return {
+    status: response.status,
+    ok: response.ok,
+    body,
+    text,
+  };
+}
+
+function buildMetaErrorLines(params: {
+  status: number;
+  error: Record<string, unknown> | null;
+  fallbackText?: string;
+}): string[] {
+  const lines: string[] = [`status: ${params.status}`];
+  const errorSubcode = params.error?.error_subcode;
+  const errorCode = params.error?.code;
+  const errorType = params.error?.type;
+  const errorMessage = params.error?.message;
+
+  if (typeof errorSubcode === "number" || typeof errorSubcode === "string") {
+    lines.push(`error_subcode: ${String(errorSubcode)}`);
+  }
+  if (typeof errorCode === "number" || typeof errorCode === "string") {
+    lines.push(`error_code: ${String(errorCode)}`);
+  }
+  if (typeof errorType === "string" && errorType.trim()) {
+    lines.push(`error_type: ${errorType.trim()}`);
+  }
+  if (typeof errorMessage === "string" && errorMessage.trim()) {
+    lines.push(`error_message: ${errorMessage.trim()}`);
+  }
+
+  if (lines.length === 1 && params.fallbackText?.trim()) {
+    lines.push(`error_message: ${params.fallbackText.trim().slice(0, 500)}`);
+  }
+  return lines;
+}
+
+async function sendMetaStatusResponse(params: {
+  bot: Bot;
+  chatId: number;
+  runtime: RuntimeEnv;
+  threadParams: Record<string, unknown>;
+}): Promise<void> {
+  const token = process.env.META_ACCESS_TOKEN?.trim();
+  const pageId = process.env.META_PAGE_ID?.trim();
+  if (!token || !pageId) {
+    const missing: string[] = [];
+    if (!token) {
+      missing.push("META_ACCESS_TOKEN");
+    }
+    if (!pageId) {
+      missing.push("META_PAGE_ID");
+    }
+    await withTelegramApiErrorLogging({
+      operation: "sendMessage",
+      runtime: params.runtime,
+      fn: () =>
+        params.bot.api.sendMessage(
+          params.chatId,
+          `Meta status is not configured. Missing: ${missing.join(", ")}`,
+          {
+            ...params.threadParams,
+          },
+        ),
+    });
+    return;
+  }
+
+  try {
+    const result = await fetchMetaGraphJson({
+      url: `${META_GRAPH_API_BASE}/${encodeURIComponent(pageId)}?fields=id,name`,
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+    const error = extractMetaGraphError(result.body);
+    const lines =
+      result.ok && !error
+        ? [
+            `status: ${result.status}`,
+            `id: ${toStringValue(result.body?.id) ?? "<missing>"}`,
+            `name: ${toStringValue(result.body?.name) ?? "<missing>"}`,
+          ]
+        : buildMetaErrorLines({
+            status: result.status,
+            error,
+            fallbackText: result.text,
+          });
+    await withTelegramApiErrorLogging({
+      operation: "sendMessage",
+      runtime: params.runtime,
+      fn: () =>
+        params.bot.api.sendMessage(params.chatId, lines.join("\n"), {
+          ...params.threadParams,
+        }),
+    });
+  } catch {
+    await withTelegramApiErrorLogging({
+      operation: "sendMessage",
+      runtime: params.runtime,
+      fn: () =>
+        params.bot.api.sendMessage(
+          params.chatId,
+          "status: network_error\nerror_message: request_failed",
+          {
+            ...params.threadParams,
+          },
+        ),
+    });
+  }
+}
+
+async function sendMetaDebugResponse(params: {
+  bot: Bot;
+  chatId: number;
+  runtime: RuntimeEnv;
+  threadParams: Record<string, unknown>;
+}): Promise<void> {
+  const token = process.env.META_ACCESS_TOKEN?.trim();
+  const appId = process.env.META_APP_ID?.trim();
+  const appSecret = process.env.META_APP_SECRET?.trim();
+  if (!token || !appId || !appSecret) {
+    const missing: string[] = [];
+    if (!token) {
+      missing.push("META_ACCESS_TOKEN");
+    }
+    if (!appId) {
+      missing.push("META_APP_ID");
+    }
+    if (!appSecret) {
+      missing.push("META_APP_SECRET");
+    }
+    await withTelegramApiErrorLogging({
+      operation: "sendMessage",
+      runtime: params.runtime,
+      fn: () =>
+        params.bot.api.sendMessage(
+          params.chatId,
+          `Meta debug is not configured. Missing: ${missing.join(", ")}`,
+          {
+            ...params.threadParams,
+          },
+        ),
+    });
+    return;
+  }
+
+  try {
+    const query = new URLSearchParams({
+      input_token: token,
+      access_token: `${appId}|${appSecret}`,
+    });
+    const result = await fetchMetaGraphJson({
+      url: `${META_GRAPH_API_BASE}/debug_token?${query.toString()}`,
+    });
+    const error = extractMetaGraphError(result.body);
+    if (!result.ok || error) {
+      const lines = buildMetaErrorLines({
+        status: result.status,
+        error,
+        fallbackText: result.text,
+      });
+      await withTelegramApiErrorLogging({
+        operation: "sendMessage",
+        runtime: params.runtime,
+        fn: () =>
+          params.bot.api.sendMessage(params.chatId, lines.join("\n"), {
+            ...params.threadParams,
+          }),
+      });
+      return;
+    }
+
+    const data = asRecord(result.body?.data);
+    const tokenType = toStringValue(data?.token_type) ?? toStringValue(data?.type) ?? "null";
+    const expiresAt = toStringValue(data?.expires_at) ?? "null";
+    const resolvedAppId = toStringValue(data?.app_id) ?? "null";
+    const isValid = toBooleanValue(data?.is_valid);
+    const scopesRaw = Array.isArray(data?.scopes) ? data.scopes : [];
+    const scopes = scopesRaw
+      .map((entry) => toStringValue(entry))
+      .filter((entry): entry is string => Boolean(entry));
+    const lines = [
+      `is_valid: ${isValid == null ? "null" : String(isValid)}`,
+      `token_type: ${tokenType}`,
+      `expires_at: ${expiresAt}`,
+      `app_id: ${resolvedAppId}`,
+      `scopes: ${scopes.length > 0 ? scopes.join(", ") : "(none)"}`,
+    ];
+    await withTelegramApiErrorLogging({
+      operation: "sendMessage",
+      runtime: params.runtime,
+      fn: () =>
+        params.bot.api.sendMessage(params.chatId, lines.join("\n"), {
+          ...params.threadParams,
+        }),
+    });
+  } catch {
+    await withTelegramApiErrorLogging({
+      operation: "sendMessage",
+      runtime: params.runtime,
+      fn: () =>
+        params.bot.api.sendMessage(
+          params.chatId,
+          "status: network_error\nerror_message: request_failed",
+          {
+            ...params.threadParams,
+          },
+        ),
+    });
+  }
+}
 
 export type RegisterTelegramHandlerParams = {
   cfg: OpenClawConfig;
@@ -300,15 +582,26 @@ export const registerTelegramNativeCommands = ({
     nativeEnabled && nativeSkillsEnabled
       ? listSkillCommandsForAgents(boundAgentIds ? { cfg, agentIds: boundAgentIds } : { cfg })
       : [];
-  const nativeCommands = nativeEnabled
+  const builtInNativeCommands = nativeEnabled
     ? listNativeCommandSpecsForConfig(cfg, {
         skillCommands,
         provider: "telegram",
       })
     : [];
+  const metaNativeCommands = nativeEnabled
+    ? TELEGRAM_META_NATIVE_COMMANDS.map((command) => ({
+        name: command.command,
+        description: command.description,
+        acceptsArgs: false,
+      }))
+    : [];
+  const nativeCommands = [...builtInNativeCommands, ...metaNativeCommands];
   const reservedCommands = new Set(
     listNativeCommandSpecs().map((command) => command.name.toLowerCase()),
   );
+  for (const command of TELEGRAM_META_NATIVE_COMMANDS) {
+    reservedCommands.add(command.command.toLowerCase());
+  }
   for (const command of skillCommands) {
     reservedCommands.add(command.name.toLowerCase());
   }
@@ -424,7 +717,7 @@ export const registerTelegramNativeCommands = ({
             useAccessGroups,
             resolveGroupPolicy,
             resolveTelegramGroupConfig,
-            requireAuth: true,
+            requireAuth: command.name !== META_STATUS_COMMAND,
           });
           if (!auth) {
             return;
@@ -447,6 +740,24 @@ export const registerTelegramNativeCommands = ({
             messageThreadId,
           });
           const threadParams = buildTelegramThreadParams(threadSpec) ?? {};
+          if (command.name === META_STATUS_COMMAND) {
+            await sendMetaStatusResponse({
+              bot,
+              chatId,
+              runtime,
+              threadParams,
+            });
+            return;
+          }
+          if (command.name === META_DEBUG_COMMAND) {
+            await sendMetaDebugResponse({
+              bot,
+              chatId,
+              runtime,
+              threadParams,
+            });
+            return;
+          }
 
           const commandDefinition = findCommandByNativeName(command.name, "telegram");
           const rawText = ctx.match?.trim() ?? "";
