@@ -162,7 +162,7 @@ echo "[entrypoint] Token: ${OPENCLAW_GATEWAY_TOKEN:0:8}..."
 echo "[entrypoint] Port: $OPENCLAW_GATEWAY_PORT"
 
 # If first arg is "gateway", run it directly with our configured options
-if [ "${1:-}" = "gateway" ] || [ "${1:-}" = "node" ]; then
+if [ "${1:-}" = "gateway" ]; then
     echo "[entrypoint] Running gateway with explicit bind=lan and token"
 
     # Force bind mode in config and set browser defaults
