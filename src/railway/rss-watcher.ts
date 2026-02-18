@@ -15,6 +15,14 @@ const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
 const TELEGRAM_POLL_TIMEOUT_SECONDS = 25;
 const MAX_SEEN_IDS = 500;
 const STATE_PATH = "/data/.openclaw/state/etsy_rss.json";
+const META_REQUIRED_PERMISSIONS = [
+  "pages_show_list",
+  "pages_read_engagement",
+  "pages_manage_posts",
+  "instagram_basic",
+  "instagram_content_publish",
+] as const;
+const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 
 const ETSY_SHOP_RSS_URL = process.env.ETSY_SHOP_RSS_URL?.trim() ?? "";
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN?.trim() ?? "";
@@ -33,12 +41,16 @@ const RSS_INSTAGRAM_POLL_TIMEOUT_MS = toNumberOrUndefined(
   process.env.RSS_INSTAGRAM_POLL_TIMEOUT_MS,
 );
 const RSS_INSTAGRAM_TEST_IMAGE_URL = process.env.RSS_INSTAGRAM_TEST_IMAGE_URL?.trim() ?? "";
+const ROTATION_ENABLED = toBooleanOrUndefined(process.env.ROTATION_ENABLED) ?? false;
+const ROTATION_COOLDOWN_HOURS = toNumberOrUndefined(process.env.ROTATION_COOLDOWN_HOURS) ?? 24;
+const FORCE_ROTATION_POST = toBooleanOrUndefined(process.env.FORCE_ROTATION_POST) ?? false;
 const CHECK_INTERVAL_MS = resolveCheckIntervalMs(process.env.RSS_CHECK_INTERVAL_MS);
 const HEALTH_PORT = toNumberOrUndefined(process.env.PORT) ?? 8080;
 const RSS_DISABLE_HEALTH_SERVER = process.env.RSS_DISABLE_HEALTH_SERVER === "1";
 let alertsEnabledMemo: boolean | null = null;
 let facebookEnabledMemo: boolean | null = null;
 let instagramEnabledMemo: boolean | null = null;
+let forceRotationConsumed = false;
 let metaPermissionsMemo: {
   ok: boolean;
   status: number;
@@ -65,6 +77,9 @@ type WatcherState = {
   igFailedIds?: string[];
   initialized: boolean;
   telegramOffset: number;
+  last_rotation_at?: string;
+  last_posted_id?: string;
+  posted_at_by_id?: Record<string, string>;
 };
 
 type TelegramUpdatesResponse = {
@@ -105,6 +120,23 @@ function toNumberOrUndefined(raw: string | undefined): number | undefined {
   }
   const parsed = Number.parseInt(raw, 10);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function toBooleanOrUndefined(raw: string | undefined): boolean | undefined {
+  if (!raw) {
+    return undefined;
+  }
+  const normalized = raw.trim().toLowerCase();
+  if (!normalized) {
+    return undefined;
+  }
+  if (["1", "true", "yes", "y", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no", "n", "off"].includes(normalized)) {
+    return false;
+  }
+  return undefined;
 }
 
 function stripCdata(raw: string): string {
@@ -195,11 +227,39 @@ async function loadState(): Promise<WatcherState> {
       typeof parsed.telegramOffset === "number" && Number.isFinite(parsed.telegramOffset)
         ? parsed.telegramOffset
         : 0;
+    const lastRotationAt =
+      typeof parsed.last_rotation_at === "string" &&
+      Number.isFinite(Date.parse(parsed.last_rotation_at))
+        ? parsed.last_rotation_at
+        : undefined;
+    const lastPostedId =
+      typeof parsed.last_posted_id === "string" ? parsed.last_posted_id.trim() : "";
+    const postedAtByIdRaw =
+      parsed.posted_at_by_id && typeof parsed.posted_at_by_id === "object"
+        ? parsed.posted_at_by_id
+        : null;
+    const postedAtById =
+      postedAtByIdRaw && !Array.isArray(postedAtByIdRaw)
+        ? Object.fromEntries(
+            Object.entries(postedAtByIdRaw as Record<string, unknown>)
+              .map(([key, value]) => [key, typeof value === "string" ? value.trim() : ""])
+              .filter((entry): entry is [string, string] => Boolean(entry[0] && entry[1]))
+              .map(([key, value]) =>
+                Number.isFinite(Date.parse(value)) ? ([key, value] as const) : ([key, ""] as const),
+              )
+              .filter((entry) => Boolean(entry[1])),
+          )
+        : undefined;
     return {
       seenIds: seenIds.slice(0, MAX_SEEN_IDS),
       igFailedIds: igFailedIds.slice(0, MAX_SEEN_IDS),
       initialized,
       telegramOffset,
+      ...(lastRotationAt ? { last_rotation_at: lastRotationAt } : {}),
+      ...(lastPostedId ? { last_posted_id: lastPostedId } : {}),
+      ...(postedAtById && Object.keys(postedAtById).length > 0
+        ? { posted_at_by_id: postedAtById }
+        : {}),
     };
   } catch {
     return {
@@ -212,12 +272,41 @@ async function loadState(): Promise<WatcherState> {
 }
 
 async function saveState(state: WatcherState): Promise<void> {
+  const postedAtByIdEntries = Object.entries(state.posted_at_by_id ?? {})
+    .map(([key, value]) => [key.trim(), value.trim()] as const)
+    .filter((entry): entry is [string, string] => Boolean(entry[0] && entry[1]))
+    .map(([key, value]) => [key, value, Date.parse(value)] as const)
+    .filter((entry): entry is [string, string, number] => Number.isFinite(entry[2]));
+
+  postedAtByIdEntries.sort((a, b) => b[2] - a[2]);
+  const normalizedPostedAtById =
+    postedAtByIdEntries.length > 0
+      ? Object.fromEntries(
+          postedAtByIdEntries
+            .slice(0, MAX_SEEN_IDS)
+            .map(([key, value]) => [key, new Date(Date.parse(value)).toISOString()] as const),
+        )
+      : undefined;
+
+  const normalizedLastRotationAt =
+    typeof state.last_rotation_at === "string" &&
+    Number.isFinite(Date.parse(state.last_rotation_at))
+      ? new Date(Date.parse(state.last_rotation_at)).toISOString()
+      : undefined;
+  const normalizedLastPostedId =
+    typeof state.last_posted_id === "string" && state.last_posted_id.trim()
+      ? state.last_posted_id.trim()
+      : undefined;
+
   await mkdir(dirname(STATE_PATH), { recursive: true });
   await writeFile(
     STATE_PATH,
     JSON.stringify(
       {
         ...state,
+        ...(normalizedLastRotationAt ? { last_rotation_at: normalizedLastRotationAt } : {}),
+        ...(normalizedLastPostedId ? { last_posted_id: normalizedLastPostedId } : {}),
+        ...(normalizedPostedAtById ? { posted_at_by_id: normalizedPostedAtById } : {}),
         seenIds: state.seenIds.slice(0, MAX_SEEN_IDS),
         igFailedIds: state.igFailedIds?.slice(0, MAX_SEEN_IDS) ?? [],
       },
@@ -314,6 +403,105 @@ function formatTokenFingerprint(token: string): string {
 
 function logMeta(event: string, data: Record<string, unknown>) {
   console.log(`[rss][meta] ${event} ${JSON.stringify(data)}`);
+}
+
+type MetaHealthcheckStatus = {
+  page_access_ok: boolean;
+  page_id_found: boolean;
+  ig_linked: boolean;
+  missing_permissions: string[];
+  error?: string;
+};
+
+function parseIsoTimestampMs(raw: string | undefined): number | null {
+  if (typeof raw !== "string") {
+    return null;
+  }
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+async function runMetaHealthcheck(): Promise<MetaHealthcheckStatus> {
+  const missingPermissions = new Set<string>(META_REQUIRED_PERMISSIONS);
+  const errors: string[] = [];
+  let pageIdFound = false;
+  let pageAccessOk = false;
+  let igLinked = false;
+
+  if (!META_ACCESS_TOKEN || !META_PAGE_ID) {
+    const missingConfig: string[] = [];
+    if (!META_ACCESS_TOKEN) {
+      missingConfig.push("META_ACCESS_TOKEN");
+    }
+    if (!META_PAGE_ID) {
+      missingConfig.push("META_PAGE_ID");
+    }
+    const status: MetaHealthcheckStatus = {
+      page_access_ok: false,
+      page_id_found: false,
+      ig_linked: false,
+      missing_permissions: Array.from(missingPermissions),
+      error: `missing_config:${missingConfig.join(",")}`,
+    };
+    logMeta("healthcheck", status);
+    return status;
+  }
+
+  let pageAccessToken = META_ACCESS_TOKEN;
+  try {
+    const resolved = await resolveFacebookPageAccessToken({
+      pageId: META_PAGE_ID,
+      accessToken: META_ACCESS_TOKEN,
+    });
+    pageAccessToken = resolved.token;
+    pageIdFound = resolved.meAccountsStatus.matchedPage;
+  } catch (error) {
+    errors.push(`me_accounts_failed:${String(error)}`);
+  }
+
+  try {
+    const permissions = await fetchMePermissions({ accessToken: META_ACCESS_TOKEN });
+    if (!permissions.ok || !permissions.permissions) {
+      errors.push(`me_permissions_failed:status=${permissions.status}`);
+    } else {
+      for (const entry of permissions.permissions) {
+        if (entry.status.trim().toLowerCase() === "granted") {
+          missingPermissions.delete(entry.permission);
+        }
+      }
+    }
+  } catch (error) {
+    errors.push(`me_permissions_failed:${String(error)}`);
+  }
+
+  try {
+    const instagramBusiness = await resolveInstagramBusinessAccount({
+      pageId: META_PAGE_ID,
+      pageAccessToken,
+      cacheTtlMs: 5 * 60 * 1000,
+    });
+    pageAccessOk = true;
+    igLinked = Boolean(instagramBusiness?.id);
+  } catch (error) {
+    errors.push(`page_ig_link_failed:${String(error)}`);
+  }
+
+  const status: MetaHealthcheckStatus = {
+    page_access_ok: pageAccessOk,
+    page_id_found: pageIdFound,
+    ig_linked: igLinked,
+    missing_permissions: Array.from(missingPermissions),
+    ...(errors.length > 0 ? { error: errors.join(" | ") } : {}),
+  };
+
+  logMeta("healthcheck", status);
+  if (status.page_access_ok && !status.ig_linked) {
+    console.info(
+      "[rss][meta] Instagram business account not linked to this Page; IG posting cannot work.",
+    );
+  }
+
+  return status;
 }
 
 async function sendTelegramText(text: string): Promise<boolean> {
@@ -679,7 +867,66 @@ async function fetchFeed(url: string): Promise<FeedItem[]> {
   return parseFeedItems(xml);
 }
 
+type RotationSelection =
+  | { item: FeedItem; reason: "never_posted" | "stale_30d" | "least_recent"; allowRecent: boolean }
+  | { item: null; reason: "no_candidates" | "no_eligible" };
+
+function selectRotationItem(params: {
+  items: FeedItem[];
+  state: WatcherState;
+  nowMs: number;
+  allowRecent: boolean;
+}): RotationSelection {
+  const lastPostedId = params.state.last_posted_id?.trim() ?? "";
+  const postedAtById = params.state.posted_at_by_id ?? {};
+  const candidates = params.items.filter(
+    (item) => item.link && item.id && item.id !== lastPostedId,
+  );
+  if (candidates.length === 0) {
+    return { item: null, reason: "no_candidates" };
+  }
+
+  const neverPosted = candidates.filter((item) => !postedAtById[item.id]);
+  if (neverPosted.length > 0) {
+    return { item: neverPosted[0], reason: "never_posted", allowRecent: params.allowRecent };
+  }
+
+  const posted = candidates
+    .map((item) => {
+      const postedAt = postedAtById[item.id];
+      const postedAtMs = parseIsoTimestampMs(postedAt);
+      return postedAtMs == null ? null : { item, postedAtMs };
+    })
+    .filter((entry): entry is { item: FeedItem; postedAtMs: number } => Boolean(entry));
+
+  const stale = posted.filter((entry) => params.nowMs - entry.postedAtMs >= THIRTY_DAYS_MS);
+  if (stale.length > 0) {
+    stale.sort((a, b) => a.postedAtMs - b.postedAtMs);
+    return { item: stale[0].item, reason: "stale_30d", allowRecent: params.allowRecent };
+  }
+
+  if (params.allowRecent && posted.length > 0) {
+    posted.sort((a, b) => a.postedAtMs - b.postedAtMs);
+    return { item: posted[0].item, reason: "least_recent", allowRecent: params.allowRecent };
+  }
+
+  return { item: null, reason: "no_eligible" };
+}
+
+function recordPostedItem(
+  state: WatcherState,
+  params: { itemId: string; postedAtIso: string },
+): void {
+  state.last_posted_id = params.itemId;
+  if (!state.posted_at_by_id) {
+    state.posted_at_by_id = {};
+  }
+  state.posted_at_by_id[params.itemId] = params.postedAtIso;
+}
+
 async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<void> {
+  await runMetaHealthcheck();
+
   if (!ETSY_SHOP_RSS_URL) {
     if (trigger === "startup") {
       console.log("[rss] ETSY_SHOP_RSS_URL is missing; watcher idle.");
@@ -710,8 +957,81 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
 
     if (newItems.length === 0) {
       console.log(`[rss] ${trigger}: no new items.`);
+
+      const nowMs = Date.now();
+      const cooldownHours = Number.isFinite(ROTATION_COOLDOWN_HOURS)
+        ? Math.max(0, ROTATION_COOLDOWN_HOURS)
+        : 24;
+      const cooldownMs = cooldownHours * 60 * 60 * 1000;
+      const lastRotationMs = parseIsoTimestampMs(currentState.last_rotation_at);
+      const cooldownOk = lastRotationMs == null || nowMs - lastRotationMs >= cooldownMs;
+      const forceThisRun = FORCE_ROTATION_POST && !forceRotationConsumed;
+      const rotationAllowed = forceThisRun || (ROTATION_ENABLED && cooldownOk);
+
+      if (!rotationAllowed) {
+        if (!ROTATION_ENABLED && !forceThisRun) {
+          console.log("[rss] No new items; rotation skipped (disabled).");
+        } else if (!cooldownOk && !forceThisRun) {
+          console.log("[rss] No new items; rotation skipped (cooldown).");
+        } else {
+          console.log("[rss] No new items; rotation skipped.");
+        }
+
+        if (trigger === "manual" && alertsEnabled()) {
+          await sendTelegramText("RSS run complete: no new items.");
+        }
+        return;
+      }
+
+      if (!facebookEnabled() && !instagramEnabled()) {
+        console.log("[rss] No new items; rotation skipped (no channels enabled).");
+        if (trigger === "manual" && alertsEnabled()) {
+          await sendTelegramText("RSS run complete: no new items.");
+        }
+        return;
+      }
+
+      if (forceThisRun) {
+        forceRotationConsumed = true;
+        console.log("[rss] MODE=FORCE_ROTATION_POST");
+      }
+
+      const selection = selectRotationItem({
+        items,
+        state: currentState,
+        nowMs,
+        allowRecent: forceThisRun,
+      });
+
+      if (!selection.item) {
+        console.log(`[rss] No new items; rotation skipped (${selection.reason}).`);
+        if (trigger === "manual" && alertsEnabled()) {
+          await sendTelegramText("RSS run complete: no new items.");
+        }
+        return;
+      }
+
+      console.log(
+        `[rss] Rotation selected: id=${selection.item.id} reason=${selection.reason} allow_recent=${selection.allowRecent ? "yes" : "no"}`,
+      );
+
+      await postFacebookItem(selection.item);
+      const igResult = await postInstagramItem(selection.item);
+      if (!igResult.ok) {
+        currentState.igFailedIds = [
+          selection.item.id,
+          ...(currentState.igFailedIds ?? []).filter((entry) => entry !== selection.item.id),
+        ].slice(0, MAX_SEEN_IDS);
+      }
+
+      const postedAtIso = new Date().toISOString();
+      recordPostedItem(currentState, { itemId: selection.item.id, postedAtIso });
+      currentState.last_rotation_at = postedAtIso;
+      await saveState(currentState);
+      console.log(`[rss] Rotation post complete: id=${selection.item.id}`);
+
       if (trigger === "manual" && alertsEnabled()) {
-        await sendTelegramText("RSS run complete: no new items.");
+        await sendTelegramText(`RSS run complete: rotation post delivered (no new items).`);
       }
       return;
     }
@@ -730,6 +1050,7 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
             ...(currentState.igFailedIds ?? []).filter((entry) => entry !== item.id),
           ].slice(0, MAX_SEEN_IDS);
         }
+        recordPostedItem(currentState, { itemId: item.id, postedAtIso: new Date().toISOString() });
       }
       if (trigger === "manual") {
         await sendTelegramText(`RSS run complete: ${sortedNew.length} new item(s).`);
@@ -745,6 +1066,7 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
             ...(currentState.igFailedIds ?? []).filter((entry) => entry !== item.id),
           ].slice(0, MAX_SEEN_IDS);
         }
+        recordPostedItem(currentState, { itemId: item.id, postedAtIso: new Date().toISOString() });
       }
     }
 
@@ -874,7 +1196,7 @@ async function main(): Promise<void> {
   }
 
   console.log(
-    `RSS watcher boot: ETSY_SHOP_RSS_URL present=${ETSY_SHOP_RSS_URL ? "yes" : "no"}, state_path=${STATE_PATH}, facebook=${RSS_FACEBOOK_ENABLED ? "on" : "off"}, instagram=${RSS_INSTAGRAM_ENABLED ? "on" : "off"}`,
+    `RSS watcher boot: ETSY_SHOP_RSS_URL present=${ETSY_SHOP_RSS_URL ? "yes" : "no"}, state_path=${STATE_PATH}, facebook=${RSS_FACEBOOK_ENABLED ? "on" : "off"}, instagram=${RSS_INSTAGRAM_ENABLED ? "on" : "off"}, rotation=${ROTATION_ENABLED ? "on" : "off"}, rotation_cooldown_hours=${ROTATION_COOLDOWN_HOURS}, force_rotation=${FORCE_ROTATION_POST ? "on" : "off"}`,
   );
   currentState = await loadState();
   await saveState(currentState);
