@@ -10,6 +10,14 @@ describe("canonicalizeEtsyListingUrl", () => {
     ).toBe("https://www.etsy.com/listing/1234567890/vintage-vase");
   });
 
+  it("accepts locale-prefixed listing URLs", () => {
+    expect(
+      canonicalizeEtsyListingUrl(
+        "https://www.etsy.com/en-gb/listing/1234567890/vintage-vase?utm_source=x#reviews",
+      ),
+    ).toBe("https://www.etsy.com/listing/1234567890/vintage-vase");
+  });
+
   it("rejects shortened etsy.me URLs", () => {
     expect(() => canonicalizeEtsyListingUrl("https://etsy.me/abc123")).toThrow(
       /Shortened Etsy URLs are not allowed/,

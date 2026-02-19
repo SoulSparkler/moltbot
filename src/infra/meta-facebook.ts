@@ -90,7 +90,9 @@ export function canonicalizeEtsyListingUrl(raw: string): string {
     throw new Error(`ETSY_URL_INVALID: Not an Etsy URL: "${raw}"`);
   }
 
-  const match = /^\/listing\/(\d+)(?:\/([^/?#]+))?/i.exec(parsed.pathname);
+  const pathname = parsed.pathname.replace(/^\/[a-z]{2}(?:-[a-z]{2})?\/listing\//i, "/listing/");
+
+  const match = /^\/listing\/(\d+)(?:\/([^/?#]+))?/i.exec(pathname);
   if (!match) {
     throw new Error(`ETSY_URL_INVALID: Not a listing URL: "${raw}"`);
   }
