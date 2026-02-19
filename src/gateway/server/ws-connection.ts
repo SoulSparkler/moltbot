@@ -293,7 +293,7 @@ export function attachGatewayWsConnectionHandler(params: {
     });
 
     pingTimer = setInterval(() => {
-      if (closed || socket.readyState !== WebSocket.OPEN) {
+      if (closed || socket.readyState !== socket.OPEN) {
         return;
       }
       const now = Date.now();
