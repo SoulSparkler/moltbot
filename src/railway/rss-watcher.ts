@@ -30,10 +30,12 @@ const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID?.trim() ?? "";
 const TELEGRAM_POLLING_ENABLED = process.env.RUN_TELEGRAM_POLLING === "true";
 const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN?.trim() ?? "";
 const META_PAGE_ID = process.env.META_PAGE_ID?.trim() ?? "";
-const RSS_FACEBOOK_ENABLED = process.env.RSS_FACEBOOK_ENABLED === "1";
+const FACEBOOK_ENABLED_TOGGLE = resolveBooleanToggle("FACEBOOK_ENABLED", "RSS_FACEBOOK_ENABLED");
+const INSTAGRAM_ENABLED_TOGGLE = resolveBooleanToggle("INSTAGRAM_ENABLED", "RSS_INSTAGRAM_ENABLED");
+const FACEBOOK_ENABLED = FACEBOOK_ENABLED_TOGGLE.enabled;
 const RSS_FACEBOOK_VERIFY_ATTACHMENT = process.env.RSS_FACEBOOK_VERIFY_ATTACHMENT === "1";
 const RSS_FACEBOOK_VERIFY_DELAY_MS = toNumberOrUndefined(process.env.RSS_FACEBOOK_VERIFY_DELAY_MS);
-const RSS_INSTAGRAM_ENABLED = process.env.RSS_INSTAGRAM_ENABLED === "1";
+const INSTAGRAM_ENABLED = INSTAGRAM_ENABLED_TOGGLE.enabled;
 const RSS_INSTAGRAM_IMAGE_URL_OVERRIDE = process.env.RSS_INSTAGRAM_IMAGE_URL_OVERRIDE?.trim() ?? "";
 const RSS_INSTAGRAM_POLL_INTERVAL_MS = toNumberOrUndefined(
   process.env.RSS_INSTAGRAM_POLL_INTERVAL_MS,
@@ -138,6 +140,33 @@ function toBooleanOrUndefined(raw: string | undefined): boolean | undefined {
     return false;
   }
   return undefined;
+}
+
+type BooleanToggleResolution = {
+  enabled: boolean;
+  primaryEnv: string;
+  primaryRaw: string | null;
+  legacyEnv?: string;
+  legacyRaw?: string | null;
+};
+
+function resolveBooleanToggle(primaryEnv: string, legacyEnv?: string): BooleanToggleResolution {
+  const primaryRaw = process.env[primaryEnv] ?? null;
+  const legacyRaw = legacyEnv ? (process.env[legacyEnv] ?? null) : null;
+  const raw = primaryRaw ?? legacyRaw ?? undefined;
+  return {
+    enabled: toBooleanOrUndefined(raw) ?? false,
+    primaryEnv,
+    primaryRaw,
+    ...(legacyEnv ? { legacyEnv, legacyRaw } : {}),
+  };
+}
+
+function formatEnvValue(raw: string | null | undefined): string {
+  if (raw == null || raw === "") {
+    return "<unset>";
+  }
+  return raw;
 }
 
 function stripCdata(raw: string): string {
@@ -342,9 +371,9 @@ function facebookEnabled(): boolean {
     return facebookEnabledMemo;
   }
 
-  if (!RSS_FACEBOOK_ENABLED) {
+  if (!FACEBOOK_ENABLED) {
     facebookEnabledMemo = false;
-    console.info("[rss] RSS_FACEBOOK_ENABLED is not set; Facebook posts disabled.");
+    console.info('[rss] facebook disabled; skipping (set FACEBOOK_ENABLED="true" to enable).');
     return facebookEnabledMemo;
   }
   if (!META_ACCESS_TOKEN) {
@@ -370,9 +399,9 @@ function instagramEnabled(): boolean {
     return instagramEnabledMemo;
   }
 
-  if (!RSS_INSTAGRAM_ENABLED) {
+  if (!INSTAGRAM_ENABLED) {
     instagramEnabledMemo = false;
-    console.info("[rss] RSS_INSTAGRAM_ENABLED is not set; Instagram posts disabled.");
+    console.info('[rss] instagram disabled; skipping (set INSTAGRAM_ENABLED="true" to enable).');
     return instagramEnabledMemo;
   }
   if (!META_ACCESS_TOKEN) {
@@ -683,6 +712,7 @@ async function resolveEtsyListingOgImageUrl(listingUrl: string): Promise<string>
 
 async function postInstagramItem(item: FeedItem): Promise<{ ok: boolean; igId: string | null }> {
   if (!instagramEnabled()) {
+    console.log("[rss] instagram disabled; skipping");
     return { ok: true, igId: null };
   }
 
@@ -690,6 +720,7 @@ async function postInstagramItem(item: FeedItem): Promise<{ ok: boolean; igId: s
     console.log(`[rss] Instagram post skipped: missing item.link for "${item.title}"`);
     return { ok: false, igId: null };
   }
+  console.log("[rss] instagram enabled; attempting publish");
 
   let igId: string | null = null;
   let imageUrlForLog: string | null = null;
@@ -1182,6 +1213,9 @@ async function pollTelegramForCommands(): Promise<void> {
 
 async function main(): Promise<void> {
   console.log(`telegram.polling.enabled=${TELEGRAM_POLLING_ENABLED}`);
+  console.log(
+    `[rss] toggles: FACEBOOK_ENABLED=${FACEBOOK_ENABLED} (FACEBOOK_ENABLED=${formatEnvValue(FACEBOOK_ENABLED_TOGGLE.primaryRaw)}, RSS_FACEBOOK_ENABLED=${formatEnvValue(FACEBOOK_ENABLED_TOGGLE.legacyRaw)}), INSTAGRAM_ENABLED=${INSTAGRAM_ENABLED} (INSTAGRAM_ENABLED=${formatEnvValue(INSTAGRAM_ENABLED_TOGGLE.primaryRaw)}, RSS_INSTAGRAM_ENABLED=${formatEnvValue(INSTAGRAM_ENABLED_TOGGLE.legacyRaw)}), ROTATION_ENABLED=${ROTATION_ENABLED} (ROTATION_ENABLED=${formatEnvValue(process.env.ROTATION_ENABLED)})`,
+  );
   if (!RSS_DISABLE_HEALTH_SERVER) {
     const healthServer = createServer((req, res) => {
       if (req.url === "/health") {
@@ -1202,7 +1236,7 @@ async function main(): Promise<void> {
   }
 
   console.log(
-    `RSS watcher boot: ETSY_SHOP_RSS_URL present=${ETSY_SHOP_RSS_URL ? "yes" : "no"}, state_path=${STATE_PATH}, facebook=${RSS_FACEBOOK_ENABLED ? "on" : "off"}, instagram=${RSS_INSTAGRAM_ENABLED ? "on" : "off"}, rotation=${ROTATION_ENABLED ? "on" : "off"}, rotation_cooldown_hours=${ROTATION_COOLDOWN_HOURS}, force_rotation=${FORCE_ROTATION_POST ? "on" : "off"}`,
+    `RSS watcher boot: ETSY_SHOP_RSS_URL present=${ETSY_SHOP_RSS_URL ? "yes" : "no"}, state_path=${STATE_PATH}, facebook=${FACEBOOK_ENABLED ? "on" : "off"}, instagram=${INSTAGRAM_ENABLED ? "on" : "off"}, rotation=${ROTATION_ENABLED ? "on" : "off"}, rotation_cooldown_hours=${ROTATION_COOLDOWN_HOURS}, force_rotation=${FORCE_ROTATION_POST ? "on" : "off"}`,
   );
   currentState = await loadState();
   await saveState(currentState);
