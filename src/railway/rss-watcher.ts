@@ -27,6 +27,7 @@ const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 const ETSY_SHOP_RSS_URL = process.env.ETSY_SHOP_RSS_URL?.trim() ?? "";
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN?.trim() ?? "";
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID?.trim() ?? "";
+const TELEGRAM_POLLING_ENABLED = process.env.RUN_TELEGRAM_POLLING === "true";
 const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN?.trim() ?? "";
 const META_PAGE_ID = process.env.META_PAGE_ID?.trim() ?? "";
 const RSS_FACEBOOK_ENABLED = process.env.RSS_FACEBOOK_ENABLED === "1";
@@ -1106,6 +1107,10 @@ async function scheduleCheck(trigger: "startup" | "scheduled" | "manual"): Promi
 }
 
 async function pollTelegramForCommands(): Promise<void> {
+  if (!TELEGRAM_POLLING_ENABLED) {
+    console.log('[rss] Telegram command polling disabled (RUN_TELEGRAM_POLLING !== "true").');
+    return;
+  }
   if (!TELEGRAM_BOT_TOKEN) {
     console.log("[rss] Telegram command polling disabled (missing TELEGRAM_BOT_TOKEN).");
     return;
@@ -1176,6 +1181,7 @@ async function pollTelegramForCommands(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  console.log(`telegram.polling.enabled=${TELEGRAM_POLLING_ENABLED}`);
   if (!RSS_DISABLE_HEALTH_SERVER) {
     const healthServer = createServer((req, res) => {
       if (req.url === "/health") {

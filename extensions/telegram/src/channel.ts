@@ -30,6 +30,7 @@ import {
 import { getTelegramRuntime } from "./runtime.js";
 
 const meta = getChatChannelMeta("telegram");
+let telegramPollingEnabledLogged = false;
 
 const telegramMessageActions: ChannelMessageActionAdapter = {
   listActions: (ctx) =>
@@ -386,6 +387,25 @@ export const telegramPlugin: ChannelPlugin<ResolvedTelegramAccount, TelegramProb
   gateway: {
     startAccount: async (ctx) => {
       const account = ctx.account;
+      const pollingEnabled = process.env.RUN_TELEGRAM_POLLING === "true";
+      if (!telegramPollingEnabledLogged) {
+        telegramPollingEnabledLogged = true;
+        ctx.log?.info(`telegram.polling.enabled=${pollingEnabled}`);
+      }
+
+      const useWebhook = Boolean(account.config.webhookUrl);
+      if (!useWebhook && !pollingEnabled) {
+        ctx.log?.info(
+          `[${account.accountId}] Telegram polling skipped (RUN_TELEGRAM_POLLING !== "true").`,
+        );
+        ctx.setStatus({
+          accountId: ctx.accountId,
+          running: false,
+          lastError: 'polling disabled via RUN_TELEGRAM_POLLING (set to "true" to enable)',
+        });
+        return;
+      }
+
       const token = account.token.trim();
       let telegramBotLabel = "";
       try {
@@ -410,7 +430,7 @@ export const telegramPlugin: ChannelPlugin<ResolvedTelegramAccount, TelegramProb
         config: ctx.cfg,
         runtime: ctx.runtime,
         abortSignal: ctx.abortSignal,
-        useWebhook: Boolean(account.config.webhookUrl),
+        useWebhook,
         webhookUrl: account.config.webhookUrl,
         webhookSecret: account.config.webhookSecret,
         webhookPath: account.config.webhookPath,
