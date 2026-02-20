@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { dirname } from "node:path";
+import { extractEtsyListingImageUrlFromHtml } from "../infra/etsy.js";
 import { canonicalizeEtsyListingUrl, postFacebookPageEtsyListing } from "../infra/meta-facebook.js";
 import {
   fetchMePermissions,
@@ -442,6 +443,17 @@ function logMeta(event: string, data: Record<string, unknown>) {
   console.log(`[rss][meta] ${event} ${JSON.stringify(data)}`);
 }
 
+function urlHostOrNull(raw: string | null): string | null {
+  if (!raw) {
+    return null;
+  }
+  try {
+    return new URL(raw).hostname;
+  } catch {
+    return null;
+  }
+}
+
 type MetaHealthcheckStatus = {
   page_access_ok: boolean;
   page_id_found: boolean;
@@ -742,35 +754,56 @@ async function resolveInstagramBusinessOnce(): Promise<InstagramBusinessAccount 
   return instagramBusinessMemo;
 }
 
-async function resolveEtsyListingOgImageUrl(listingUrl: string): Promise<string> {
-  const canonical = canonicalizeEtsyListingUrl(listingUrl);
-  const response = await fetch(canonical, {
-    headers: {
-      accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "user-agent": "OpenClawRSS/1.0",
-    },
-  });
-  if (!response.ok) {
-    throw new Error(`ETSY_IMAGE_FETCH_FAILED: HTTP ${response.status}`);
-  }
+const ETSY_LISTING_HTML_USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36";
 
-  const html = await response.text();
-  const candidates: RegExp[] = [
-    /<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["'][^>]*>/i,
-    /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["'][^>]*>/i,
-    /<meta[^>]+name=["']twitter:image["'][^>]+content=["']([^"']+)["'][^>]*>/i,
-    /<meta[^>]+content=["']([^"']+)["'][^>]+name=["']twitter:image["'][^>]*>/i,
-  ];
+async function fetchEtsyListingHtml(params: { listingUrlNormalized: string }): Promise<string> {
+  let lastStatus: number | null = null;
+  let lastError: unknown = null;
 
-  for (const re of candidates) {
-    const match = re.exec(html);
-    const url = match?.[1]?.trim();
-    if (url) {
-      return url;
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      const response = await fetch(params.listingUrlNormalized, {
+        headers: {
+          accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "accept-language": "en-US,en;q=0.9",
+          "user-agent": ETSY_LISTING_HTML_USER_AGENT,
+        },
+      });
+      lastStatus = response.status;
+
+      const html = await response.text();
+      if (response.status === 200 && html.trim()) {
+        return html;
+      }
+      lastError = `http_${response.status}_or_empty_body`;
+    } catch (error) {
+      lastError = error;
+    }
+
+    if (attempt < 2) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 500));
     }
   }
 
-  throw new Error("ETSY_IMAGE_NOT_FOUND: missing og:image");
+  throw new Error(
+    `ETSY_LISTING_HTML_FETCH_FAILED: status=${lastStatus ?? "network_error"} error=${String(
+      lastError,
+    )}`,
+  );
+}
+
+async function resolveEtsyListingImageUrl(listingUrlNormalized: string): Promise<{
+  listingUrlNormalized: string;
+  imageUrl: string;
+  imageSource: "og_image" | "json_ld";
+}> {
+  const html = await fetchEtsyListingHtml({ listingUrlNormalized });
+  const extracted = extractEtsyListingImageUrlFromHtml(html);
+  if (!extracted?.url) {
+    throw new Error("ETSY_IMAGE_URL_MISSING: unable to extract og:image or JSON-LD image.");
+  }
+  return { listingUrlNormalized, imageUrl: extracted.url, imageSource: extracted.source };
 }
 
 async function postInstagramItem(item: FeedItem): Promise<{ ok: boolean; igId: string | null }> {
@@ -786,7 +819,9 @@ async function postInstagramItem(item: FeedItem): Promise<{ ok: boolean; igId: s
   console.log("[rss] instagram enabled; attempting publish");
 
   let igId: string | null = null;
-  let imageUrlForLog: string | null = null;
+  let listingUrlNormalizedForLog: string | null = null;
+  let imageHostForLog: string | null = null;
+  let imageSourceForLog: string | null = null;
   let tokenSourceForLog: string | null = null;
   let tokenFingerprintForLog: string | null = null;
   try {
@@ -807,9 +842,21 @@ async function postInstagramItem(item: FeedItem): Promise<{ ok: boolean; igId: s
     }
 
     const caption = item.title.trim();
-    const imageUrl =
-      RSS_INSTAGRAM_IMAGE_URL_OVERRIDE || (await resolveEtsyListingOgImageUrl(item.link));
-    imageUrlForLog = imageUrl;
+    const listingUrlNormalized = canonicalizeEtsyListingUrl(item.link);
+    listingUrlNormalizedForLog = listingUrlNormalized;
+
+    let imageUrl: string;
+    if (RSS_INSTAGRAM_IMAGE_URL_OVERRIDE) {
+      imageUrl = RSS_INSTAGRAM_IMAGE_URL_OVERRIDE;
+      imageSourceForLog = "override";
+    } else {
+      const resolved = await resolveEtsyListingImageUrl(listingUrlNormalized);
+      listingUrlNormalizedForLog = resolved.listingUrlNormalized;
+      imageUrl = resolved.imageUrl;
+      imageSourceForLog = resolved.imageSource;
+    }
+
+    imageHostForLog = urlHostOrNull(imageUrl);
 
     logMeta("instagram_publish_attempt", {
       feedItemId: item.id,
@@ -817,7 +864,9 @@ async function postInstagramItem(item: FeedItem): Promise<{ ok: boolean; igId: s
       igId: instagramBusiness.id,
       tokenSource: pageToken.source,
       tokenFingerprint: pageToken.fingerprint,
-      imageUrl,
+      listingUrlNormalized,
+      imageHost: imageHostForLog,
+      imageSource: imageSourceForLog,
       captionPreview: caption.slice(0, 120),
     });
 
@@ -842,12 +891,13 @@ async function postInstagramItem(item: FeedItem): Promise<{ ok: boolean; igId: s
     if (error instanceof MetaGraphRequestError) {
       logMeta("instagram_publish_failed", {
         feedItemId: item.id,
-        listingUrl: item.link,
+        listingUrlNormalized: listingUrlNormalizedForLog,
         pageId: META_PAGE_ID,
         igId,
         tokenSource: tokenSourceForLog,
         tokenFingerprint: tokenFingerprintForLog,
-        imageUrl: imageUrlForLog,
+        imageHost: imageHostForLog,
+        imageSource: imageSourceForLog,
         request: { method: error.method, url: error.url },
         status: error.status,
         error: error.error,
@@ -857,12 +907,13 @@ async function postInstagramItem(item: FeedItem): Promise<{ ok: boolean; igId: s
 
     logMeta("instagram_publish_failed", {
       feedItemId: item.id,
-      listingUrl: item.link,
+      listingUrlNormalized: listingUrlNormalizedForLog,
       pageId: META_PAGE_ID,
       igId,
       tokenSource: tokenSourceForLog,
       tokenFingerprint: tokenFingerprintForLog,
-      imageUrl: imageUrlForLog,
+      imageHost: imageHostForLog,
+      imageSource: imageSourceForLog,
       error: String(error),
     });
     return { ok: false, igId };
@@ -899,7 +950,7 @@ async function postInstagramTest(): Promise<boolean> {
       igId: instagramBusiness.id,
       tokenSource: pageToken.source,
       tokenFingerprint: pageToken.fingerprint,
-      imageUrl: RSS_INSTAGRAM_TEST_IMAGE_URL,
+      imageHost: urlHostOrNull(RSS_INSTAGRAM_TEST_IMAGE_URL),
     });
 
     const result = await publishInstagramPhoto({
