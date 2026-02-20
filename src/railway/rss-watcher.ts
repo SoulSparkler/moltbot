@@ -5,6 +5,7 @@ import { canonicalizeEtsyListingUrl, postFacebookPageEtsyListing } from "../infr
 import {
   fetchMePermissions,
   type InstagramBusinessAccount,
+  type MetaPageAccessTokenResolution,
   MetaGraphRequestError,
   publishInstagramPhoto,
   resolveFacebookPageAccessToken,
@@ -29,6 +30,7 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN?.trim() ?? "";
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID?.trim() ?? "";
 const TELEGRAM_POLLING_ENABLED = process.env.RUN_TELEGRAM_POLLING === "true";
 const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN?.trim() ?? "";
+const META_PAGE_ACCESS_TOKEN = process.env.META_PAGE_ACCESS_TOKEN?.trim() ?? "";
 const META_PAGE_ID = process.env.META_PAGE_ID?.trim() ?? "";
 const FACEBOOK_ENABLED_TOGGLE = resolveBooleanToggle("FACEBOOK_ENABLED", "RSS_FACEBOOK_ENABLED");
 const INSTAGRAM_ENABLED_TOGGLE = resolveBooleanToggle("INSTAGRAM_ENABLED", "RSS_INSTAGRAM_ENABLED");
@@ -61,9 +63,10 @@ let metaPermissionsMemo: {
 } | null = null;
 let metaPageTokenMemo: {
   token: string;
-  source: "provided" | "me_accounts";
+  source: "env" | MetaPageAccessTokenResolution["source"];
   pageName: string | null;
   fingerprint: string;
+  meAccountsStatus: MetaPageAccessTokenResolution["meAccountsStatus"] | null;
 } | null = null;
 let instagramBusinessMemo: InstagramBusinessAccount | null | undefined = undefined;
 
@@ -376,9 +379,11 @@ function facebookEnabled(): boolean {
     console.info('[rss] facebook disabled; skipping (set FACEBOOK_ENABLED="true" to enable).');
     return facebookEnabledMemo;
   }
-  if (!META_ACCESS_TOKEN) {
+  if (!META_ACCESS_TOKEN && !META_PAGE_ACCESS_TOKEN) {
     facebookEnabledMemo = false;
-    console.info("[rss] META_ACCESS_TOKEN missing; Facebook posts disabled.");
+    console.info(
+      "[rss] META_ACCESS_TOKEN and META_PAGE_ACCESS_TOKEN missing; Facebook posts disabled.",
+    );
     return facebookEnabledMemo;
   }
   if (!META_PAGE_ID) {
@@ -404,9 +409,11 @@ function instagramEnabled(): boolean {
     console.info('[rss] instagram disabled; skipping (set INSTAGRAM_ENABLED="true" to enable).');
     return instagramEnabledMemo;
   }
-  if (!META_ACCESS_TOKEN) {
+  if (!META_ACCESS_TOKEN && !META_PAGE_ACCESS_TOKEN) {
     instagramEnabledMemo = false;
-    console.info("[rss] META_ACCESS_TOKEN missing; Instagram posts disabled.");
+    console.info(
+      "[rss] META_ACCESS_TOKEN and META_PAGE_ACCESS_TOKEN missing; Instagram posts disabled.",
+    );
     return instagramEnabledMemo;
   }
   if (!META_PAGE_ID) {
@@ -458,13 +465,14 @@ async function runMetaHealthcheck(): Promise<MetaHealthcheckStatus> {
   let pageAccessOk = false;
   let igLinked = false;
 
-  if (!META_ACCESS_TOKEN || !META_PAGE_ID) {
+  if (!META_PAGE_ID || (!META_ACCESS_TOKEN && !META_PAGE_ACCESS_TOKEN)) {
     const missingConfig: string[] = [];
-    if (!META_ACCESS_TOKEN) {
-      missingConfig.push("META_ACCESS_TOKEN");
-    }
     if (!META_PAGE_ID) {
       missingConfig.push("META_PAGE_ID");
+    }
+    if (!META_ACCESS_TOKEN && !META_PAGE_ACCESS_TOKEN) {
+      missingConfig.push("META_ACCESS_TOKEN");
+      missingConfig.push("META_PAGE_ACCESS_TOKEN");
     }
     const status: MetaHealthcheckStatus = {
       page_access_ok: false,
@@ -477,43 +485,46 @@ async function runMetaHealthcheck(): Promise<MetaHealthcheckStatus> {
     return status;
   }
 
-  let pageAccessToken = META_ACCESS_TOKEN;
+  let pageToken: Awaited<ReturnType<typeof resolveMetaPageTokenOnce>> | null = null;
   try {
-    const resolved = await resolveFacebookPageAccessToken({
-      pageId: META_PAGE_ID,
-      accessToken: META_ACCESS_TOKEN,
-    });
-    pageAccessToken = resolved.token;
-    pageIdFound = resolved.meAccountsStatus.matchedPage;
+    pageToken = await resolveMetaPageTokenOnce();
+    pageIdFound =
+      pageToken.source === "env" ? true : Boolean(pageToken.meAccountsStatus?.matchedPage);
   } catch (error) {
-    errors.push(`me_accounts_failed:${String(error)}`);
+    errors.push(`page_token_failed:${String(error)}`);
   }
 
-  try {
-    const permissions = await fetchMePermissions({ accessToken: META_ACCESS_TOKEN });
-    if (!permissions.ok || !permissions.permissions) {
-      errors.push(`me_permissions_failed:status=${permissions.status}`);
-    } else {
-      for (const entry of permissions.permissions) {
-        if (entry.status.trim().toLowerCase() === "granted") {
-          missingPermissions.delete(entry.permission);
+  if (META_ACCESS_TOKEN) {
+    try {
+      const permissions = await fetchMePermissions({ accessToken: META_ACCESS_TOKEN });
+      if (!permissions.ok || !permissions.permissions) {
+        errors.push(`me_permissions_failed:status=${permissions.status}`);
+      } else {
+        for (const entry of permissions.permissions) {
+          if (entry.status.trim().toLowerCase() === "granted") {
+            missingPermissions.delete(entry.permission);
+          }
         }
       }
+    } catch (error) {
+      errors.push(`me_permissions_failed:${String(error)}`);
     }
-  } catch (error) {
-    errors.push(`me_permissions_failed:${String(error)}`);
+  } else {
+    errors.push("me_permissions_skipped:missing_META_ACCESS_TOKEN");
   }
 
-  try {
-    const instagramBusiness = await resolveInstagramBusinessAccount({
-      pageId: META_PAGE_ID,
-      pageAccessToken,
-      cacheTtlMs: 5 * 60 * 1000,
-    });
-    pageAccessOk = true;
-    igLinked = Boolean(instagramBusiness?.id);
-  } catch (error) {
-    errors.push(`page_ig_link_failed:${String(error)}`);
+  if (pageToken && pageToken.token) {
+    try {
+      const instagramBusiness = await resolveInstagramBusinessAccount({
+        pageId: META_PAGE_ID,
+        pageAccessToken: pageToken.token,
+        cacheTtlMs: 5 * 60 * 1000,
+      });
+      pageAccessOk = true;
+      igLinked = Boolean(instagramBusiness?.id);
+    } catch (error) {
+      errors.push(`page_ig_link_failed:${String(error)}`);
+    }
   }
 
   const status: MetaHealthcheckStatus = {
@@ -580,9 +591,18 @@ async function postFacebookItem(item: FeedItem): Promise<void> {
   }
 
   try {
+    const pageToken = await resolveMetaPageTokenOnce();
+    logMeta("facebook_publish_attempt", {
+      feedItemId: item.id,
+      pageId: META_PAGE_ID,
+      tokenSource: pageToken.source,
+      tokenFingerprint: pageToken.fingerprint,
+      listingUrl: item.link,
+    });
+
     const result = await postFacebookPageEtsyListing({
       pageId: META_PAGE_ID,
-      accessToken: META_ACCESS_TOKEN,
+      accessToken: pageToken.token,
       message: item.title,
       etsyListingUrl: item.link,
       verifyAttachment: RSS_FACEBOOK_VERIFY_ATTACHMENT,
@@ -599,13 +619,29 @@ async function postFacebookItem(item: FeedItem): Promise<void> {
             : "attachment=unchecked";
 
     console.log(`[rss] Facebook post created: id=${result.postId} ${attachmentStatus}`);
+    logMeta("facebook_publish_ok", {
+      pageId: META_PAGE_ID,
+      postId: result.postId,
+      attachmentStatus,
+    });
   } catch (error) {
     console.log(`[rss] Facebook post failed: ${String(error)}`);
+    logMeta("facebook_publish_failed", {
+      feedItemId: item.id,
+      pageId: META_PAGE_ID,
+      error: String(error),
+    });
   }
 }
 
 async function logMetaTokenPermissionsOnce(): Promise<void> {
   if (metaPermissionsMemo !== null) {
+    return;
+  }
+
+  if (!META_ACCESS_TOKEN) {
+    metaPermissionsMemo = { ok: false, status: -1, permissions: null };
+    logMeta("me_permissions_skipped", { reason: "META_ACCESS_TOKEN missing" });
     return;
   }
 
@@ -626,12 +662,38 @@ async function logMetaTokenPermissionsOnce(): Promise<void> {
 
 async function resolveMetaPageTokenOnce(): Promise<{
   token: string;
-  source: "provided" | "me_accounts";
+  source: "env" | MetaPageAccessTokenResolution["source"];
   pageName: string | null;
   fingerprint: string;
+  meAccountsStatus: MetaPageAccessTokenResolution["meAccountsStatus"] | null;
 }> {
   if (metaPageTokenMemo) {
     return metaPageTokenMemo;
+  }
+
+  if (META_PAGE_ACCESS_TOKEN) {
+    const fingerprint = formatTokenFingerprint(META_PAGE_ACCESS_TOKEN);
+    metaPageTokenMemo = {
+      token: META_PAGE_ACCESS_TOKEN,
+      source: "env",
+      pageName: null,
+      fingerprint,
+      meAccountsStatus: null,
+    };
+    logMeta("page_token_resolved", {
+      pageId: META_PAGE_ID,
+      pageName: null,
+      tokenSource: "env",
+      tokenFingerprint: fingerprint,
+      meAccounts: null,
+    });
+    return metaPageTokenMemo;
+  }
+
+  if (!META_ACCESS_TOKEN) {
+    throw new Error(
+      "META_GRAPH_CONFIG_INVALID: META_ACCESS_TOKEN is missing and META_PAGE_ACCESS_TOKEN is not set.",
+    );
   }
 
   const resolution = await resolveFacebookPageAccessToken({
@@ -645,6 +707,7 @@ async function resolveMetaPageTokenOnce(): Promise<{
     source: resolution.source,
     pageName: resolution.pageName,
     fingerprint,
+    meAccountsStatus: resolution.meAccountsStatus,
   };
 
   logMeta("page_token_resolved", {

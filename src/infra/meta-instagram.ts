@@ -152,8 +152,7 @@ export function summarizeGraphError(
   const fbtraceId = toStringValue(error.fbtrace_id);
   const userTitle = toStringValue(error.error_user_title);
   const userMessage = toStringValue(error.error_user_msg);
-  const isTransient =
-    typeof error.is_transient === "boolean" ? (error.is_transient as boolean) : null;
+  const isTransient = typeof error.is_transient === "boolean" ? error.is_transient : null;
 
   return {
     message,

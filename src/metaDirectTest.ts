@@ -1,3 +1,5 @@
+import { resolveFacebookPageAccessToken } from "./infra/meta-instagram.js";
+
 const META_GRAPH_API_BASE = "https://graph.facebook.com/v18.0";
 
 function formatTokenFingerprint(token: string | undefined | null): string {
@@ -33,6 +35,23 @@ function extractError(body: Record<string, unknown> | null): Record<string, unkn
   return candidate && typeof candidate === "object" ? (candidate as Record<string, unknown>) : null;
 }
 
+function formatGraphScalar(value: unknown, fallback: string): string {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed ? trimmed : fallback;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+  if (typeof value === "bigint") {
+    return String(value);
+  }
+  if (typeof value === "boolean") {
+    return value ? "true" : "false";
+  }
+  return fallback;
+}
+
 function logGraphErrorDetails(error: Record<string, unknown> | null, prefix: string) {
   if (!error) {
     return;
@@ -41,7 +60,10 @@ function logGraphErrorDetails(error: Record<string, unknown> | null, prefix: str
   const subcode = error?.error_subcode;
   if (code !== undefined || subcode !== undefined) {
     console.log(
-      `${prefix} error.code=${String(code ?? "<none>")} error_subcode=${String(subcode ?? "<none>")}`,
+      `${prefix} error.code=${formatGraphScalar(code, "<none>")} error_subcode=${formatGraphScalar(
+        subcode,
+        "<none>",
+      )}`,
     );
   }
 }
@@ -107,18 +129,60 @@ async function runMetaPostDiag(pageId: string, token: string, fingerprint: strin
 }
 
 export async function runMetaDirectTest() {
-  const token = process.env.META_ACCESS_TOKEN;
-  const pageId = process.env.META_PAGE_ID;
+  const bootstrapToken = process.env.META_ACCESS_TOKEN?.trim() ?? "";
+  const pageTokenOverride = process.env.META_PAGE_ACCESS_TOKEN?.trim() ?? "";
+  const pageId = process.env.META_PAGE_ID?.trim() ?? "";
 
-  if (!token || !pageId) {
-    console.log("META TEST: Missing env vars");
+  if (!pageId || (!bootstrapToken && !pageTokenOverride)) {
+    const missing: string[] = [];
+    if (!pageId) {
+      missing.push("META_PAGE_ID");
+    }
+    if (!bootstrapToken && !pageTokenOverride) {
+      missing.push("META_ACCESS_TOKEN or META_PAGE_ACCESS_TOKEN");
+    }
+    console.log(`META TEST: Missing env vars: ${missing.join(", ")}`);
     return;
   }
 
-  const fingerprint = formatTokenFingerprint(token);
-  await runMetaGetCheck(pageId, token, fingerprint);
+  const getToken = bootstrapToken || pageTokenOverride;
+  const getFingerprint = formatTokenFingerprint(getToken);
+  await runMetaGetCheck(pageId, getToken, getFingerprint);
 
   if (isMetaDiagEnabled()) {
-    await runMetaPostDiag(pageId, token, fingerprint);
+    if (pageTokenOverride) {
+      const fingerprint = formatTokenFingerprint(pageTokenOverride);
+      await runMetaPostDiag(pageId, pageTokenOverride, fingerprint);
+      return;
+    }
+
+    if (!bootstrapToken) {
+      console.log(
+        "META TEST: Skipping POST /feed diag (META_PAGE_ACCESS_TOKEN not set and META_ACCESS_TOKEN missing).",
+      );
+      return;
+    }
+
+    try {
+      const resolved = await resolveFacebookPageAccessToken({
+        pageId,
+        accessToken: bootstrapToken,
+      });
+      if (resolved.source !== "me_accounts") {
+        console.log(
+          `META TEST: Skipping POST /feed diag (unable to resolve Page token via /me/accounts matched_page=${String(
+            resolved.meAccountsStatus.matchedPage,
+          )}). Set META_PAGE_ACCESS_TOKEN to override.`,
+        );
+        return;
+      }
+
+      const fingerprint = formatTokenFingerprint(resolved.token);
+      await runMetaPostDiag(pageId, resolved.token, fingerprint);
+    } catch (error) {
+      console.log(
+        `META TEST: Skipping POST /feed diag (page token resolution failed: ${String(error)})`,
+      );
+    }
   }
 }
