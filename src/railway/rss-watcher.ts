@@ -235,6 +235,24 @@ function stripHtmlToText(raw: string | undefined): string {
     .trim();
 }
 
+function stripUrlsFromText(raw: string): string {
+  const input = raw.trim();
+  if (!input) {
+    return "";
+  }
+
+  const withoutUrls = input
+    .replace(/\bhttps?:\/\/[^\s)]+/gi, "")
+    .replace(/\bwww\.[^\s)]+/gi, "")
+    .replace(/\b(?:etsy\.com|etsy\.me)\/[^\s)]+/gi, "");
+
+  return withoutUrls
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
 function truncateText(input: string, maxLength: number): string {
   const text = input.trim();
   if (!text) {
@@ -749,12 +767,8 @@ async function postFacebookItem(item: FeedItem): Promise<void> {
   if (!facebookEnabled()) {
     return;
   }
-  if (!item.link) {
-    console.log(`[rss] Facebook post skipped: missing item.link for "${item.title}"`);
-    return;
-  }
 
-  let listingUrlNormalizedForLog: string | null = null;
+  let canonicalListingUrlForLog: string | null = null;
   let listingUrlLocaleForLog: string | null = null;
   let imageHostForLog: string | null = null;
   let imageSourceForLog: string | null = null;
@@ -764,11 +778,14 @@ async function postFacebookItem(item: FeedItem): Promise<void> {
   let publishMethodForLog: string | null = null;
 
   try {
+    const rawListingUrlOrFeedItemId = item.link?.trim() ? item.link : item.id;
+    const canonicalListingUrl = canonicalizeEtsyUrl(rawListingUrlOrFeedItemId);
+    canonicalListingUrlForLog = canonicalListingUrl;
+
     const pageToken = await resolveMetaPageTokenOnce();
-    const listingUrlLocale = extractEtsyListingLocaleFromUrl(item.link);
-    const listingUrlNormalized = canonicalizeEtsyUrl(item.link);
+    const listingUrlLocale =
+      extractEtsyListingLocaleFromUrl(item.link) ?? extractEtsyListingLocaleFromUrl(item.id);
     listingUrlLocaleForLog = listingUrlLocale;
-    listingUrlNormalizedForLog = listingUrlNormalized;
 
     const title = item.title.trim();
     const descriptionText = stripHtmlToText(item.description);
@@ -789,7 +806,8 @@ async function postFacebookItem(item: FeedItem): Promise<void> {
         ? "rss_description"
         : "fallback_generic_en";
 
-    let finalCaption = captionCandidate || "New vintage item is live in the shop.";
+    let finalCaption =
+      stripUrlsFromText(captionCandidate) || "New vintage item is live in the shop.";
     captionSourceForLog = captionSource;
 
     let langDetected = detectCaptionLanguage(finalCaption);
@@ -809,6 +827,7 @@ async function postFacebookItem(item: FeedItem): Promise<void> {
       }
     }
 
+    finalCaption = stripUrlsFromText(finalCaption) || "New vintage item is live in the shop.";
     translationAppliedForLog = translationApplied;
 
     const imageUrl = extractRssImgSrc(item.description);
@@ -821,7 +840,8 @@ async function postFacebookItem(item: FeedItem): Promise<void> {
       pageId: META_PAGE_ID,
       tokenSource: pageToken.source,
       tokenFingerprint: pageToken.fingerprint,
-      listingUrlNormalized,
+      listingUrl: canonicalListingUrl,
+      postedUrl: canonicalListingUrl,
       urlLocale: listingUrlLocale,
       imageHost: imageHostForLog,
       imageSource: imageSourceForLog,
@@ -837,7 +857,7 @@ async function postFacebookItem(item: FeedItem): Promise<void> {
         pageId: META_PAGE_ID,
         accessToken: pageToken.token,
         imageUrl,
-        caption: `${finalCaption}\n${listingUrlNormalized}`,
+        caption: `${finalCaption}\n${canonicalListingUrl}`,
       });
 
       const id = result.postId ?? result.photoId;
@@ -850,13 +870,14 @@ async function postFacebookItem(item: FeedItem): Promise<void> {
         id,
         photoId: result.photoId,
         postId: result.postId,
+        postedUrl: canonicalListingUrl,
       });
     } else {
       const result = await postFacebookPageEtsyListing({
         pageId: META_PAGE_ID,
         accessToken: pageToken.token,
         message: finalCaption,
-        etsyListingUrl: listingUrlNormalized,
+        etsyListingUrl: canonicalListingUrl,
         verifyAttachment: RSS_FACEBOOK_VERIFY_ATTACHMENT,
         verifyRetryDelayMs: RSS_FACEBOOK_VERIFY_DELAY_MS ?? 15_000,
       });
@@ -876,6 +897,7 @@ async function postFacebookItem(item: FeedItem): Promise<void> {
         publishMethod: "feed",
         postId: result.postId,
         attachmentStatus,
+        postedUrl: canonicalListingUrl,
       });
     }
   } catch (error) {
@@ -883,7 +905,8 @@ async function postFacebookItem(item: FeedItem): Promise<void> {
     logMeta("facebook_publish_failed", {
       feedItemId: item.id,
       pageId: META_PAGE_ID,
-      listingUrlNormalized: listingUrlNormalizedForLog,
+      listingUrl: canonicalListingUrlForLog,
+      postedUrl: canonicalListingUrlForLog,
       urlLocale: listingUrlLocaleForLog,
       imageHost: imageHostForLog,
       imageSource: imageSourceForLog,
