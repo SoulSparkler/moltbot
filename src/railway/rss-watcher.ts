@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { dirname } from "node:path";
-import { extractEtsyListingImageUrlFromHtml } from "../infra/etsy.js";
+import { extractEtsyListingImageUrlFromHtml, extractEtsyRssImageUrl } from "../infra/etsy.js";
 import { canonicalizeEtsyListingUrl, postFacebookPageEtsyListing } from "../infra/meta-facebook.js";
 import {
   fetchMePermissions,
@@ -75,6 +75,7 @@ type FeedItem = {
   id: string;
   title: string;
   link: string;
+  description?: string;
   publishedAt?: string;
   publishedAtMs?: number;
 };
@@ -230,6 +231,9 @@ function parseFeedItems(xml: string): FeedItem[] {
         link ||
         title ||
         `${Date.now()}-${Math.random()}`;
+      const description =
+        findTagText(block, ["description", "content:encoded", "content", "summary"]).trim() ||
+        undefined;
       const publishedAt =
         findTagText(block, ["pubDate", "published", "updated", "dc:date"]).trim() || undefined;
       const publishedAtMs = publishedAt ? Date.parse(publishedAt) : Number.NaN;
@@ -237,6 +241,7 @@ function parseFeedItems(xml: string): FeedItem[] {
         id,
         title: title || "(untitled)",
         link,
+        ...(description ? { description } : {}),
         publishedAt,
         publishedAtMs: Number.isFinite(publishedAtMs) ? publishedAtMs : undefined,
       };
@@ -850,10 +855,16 @@ async function postInstagramItem(item: FeedItem): Promise<{ ok: boolean; igId: s
       imageUrl = RSS_INSTAGRAM_IMAGE_URL_OVERRIDE;
       imageSourceForLog = "override";
     } else {
-      const resolved = await resolveEtsyListingImageUrl(listingUrlNormalized);
-      listingUrlNormalizedForLog = resolved.listingUrlNormalized;
-      imageUrl = resolved.imageUrl;
-      imageSourceForLog = resolved.imageSource;
+      const extracted = extractEtsyRssImageUrl(item);
+      if (extracted) {
+        imageUrl = extracted;
+        imageSourceForLog = "rss_description_img";
+      } else {
+        const resolved = await resolveEtsyListingImageUrl(listingUrlNormalized);
+        listingUrlNormalizedForLog = resolved.listingUrlNormalized;
+        imageUrl = resolved.imageUrl;
+        imageSourceForLog = resolved.imageSource;
+      }
     }
 
     imageHostForLog = urlHostOrNull(imageUrl);
@@ -879,12 +890,14 @@ async function postInstagramItem(item: FeedItem): Promise<{ ok: boolean; igId: s
       pollTimeoutMs: RSS_INSTAGRAM_POLL_TIMEOUT_MS ?? 60_000,
     });
 
-    logMeta("instagram_publish_ok", {
-      pageId: META_PAGE_ID,
-      igId: result.igUserId,
-      creationId: result.creationId,
-      mediaId: result.mediaId,
-    });
+    if (result.creationId && result.mediaId) {
+      logMeta("instagram_publish_ok", {
+        pageId: META_PAGE_ID,
+        igId: result.igUserId,
+        creationId: result.creationId,
+        mediaId: result.mediaId,
+      });
+    }
 
     return { ok: true, igId: instagramBusiness.id };
   } catch (error) {

@@ -3,6 +3,32 @@ export type EtsyListingImageUrlExtraction = {
   source: "og_image" | "json_ld";
 };
 
+export function extractEtsyRssImageUrl(feedItem: { description?: string | null }): string | null {
+  const descriptionHtml =
+    typeof feedItem.description === "string" ? feedItem.description.trim() : "";
+  if (!descriptionHtml) {
+    return null;
+  }
+
+  const tags = descriptionHtml.match(/<img\b[^>]*>/gi) ?? [];
+  let firstHttpUrl: string | null = null;
+  for (const tag of tags) {
+    const src = normalizeHttpUrl(getHtmlAttribute(tag, "src"));
+    if (!src) {
+      continue;
+    }
+
+    firstHttpUrl ??= src;
+
+    const host = urlHostOrNull(src);
+    if (host && isEtsystaticHost(host)) {
+      return src;
+    }
+  }
+
+  return firstHttpUrl;
+}
+
 type JsonRecord = Record<string, unknown>;
 
 function asRecord(value: unknown): JsonRecord | null {
@@ -165,6 +191,23 @@ function extractJsonLdImageUrlFromHtml(html: string): string | null {
   }
 
   return null;
+}
+
+function isEtsystaticHost(hostname: string): boolean {
+  const normalized = hostname.trim().toLowerCase();
+  return normalized === "etsystatic.com" || normalized.endsWith(".etsystatic.com");
+}
+
+function urlHostOrNull(raw: string | null): string | null {
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    return new URL(raw).hostname;
+  } catch {
+    return null;
+  }
 }
 
 export function extractEtsyListingImageUrlFromHtml(
