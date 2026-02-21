@@ -118,6 +118,18 @@ export function canonicalizeEtsyListingUrl(raw: string): string {
   return parsed.toString();
 }
 
+export function canonicalizeEtsyUrl(raw: string): string {
+  const canonical = canonicalizeEtsyListingUrl(raw);
+
+  // Last-mile canonicalization: some feeds include locale-prefixed paths like `/nl/listing/...`.
+  // Ensure the final URL is always `https://www.etsy.com/listing/...` with no query/hash.
+  const normalized = canonical
+    .replace(/^https:\/\/www\.etsy\.com\/[a-z]{2}\/listing\//i, "https://www.etsy.com/listing/")
+    .replace(/^http:\/\/www\.etsy\.com\/listing\//i, "https://www.etsy.com/listing/");
+
+  return normalized;
+}
+
 function normalizeGraphHttpUrl(raw: string, label: string): string {
   const input = raw.trim();
   if (!input) {
@@ -250,7 +262,7 @@ export async function postFacebookPageEtsyListing(params: {
     throw new Error("META_GRAPH_CONFIG_INVALID: accessToken is missing.");
   }
 
-  const link = canonicalizeEtsyListingUrl(params.etsyListingUrl);
+  const link = canonicalizeEtsyUrl(params.etsyListingUrl);
   const message = stripUrlsFromMessage(params.message);
 
   const url = `${META_GRAPH_API_BASE}/${encodeURIComponent(pageId)}/feed`;

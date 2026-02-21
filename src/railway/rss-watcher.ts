@@ -3,7 +3,7 @@ import { createServer } from "node:http";
 import { dirname } from "node:path";
 import { extractEtsyListingImageUrlFromHtml, extractEtsyRssImageUrl } from "../infra/etsy.js";
 import {
-  canonicalizeEtsyListingUrl,
+  canonicalizeEtsyUrl,
   postFacebookPageEtsyListing,
   postFacebookPagePhoto,
 } from "../infra/meta-facebook.js";
@@ -766,7 +766,7 @@ async function postFacebookItem(item: FeedItem): Promise<void> {
   try {
     const pageToken = await resolveMetaPageTokenOnce();
     const listingUrlLocale = extractEtsyListingLocaleFromUrl(item.link);
-    const listingUrlNormalized = canonicalizeEtsyListingUrl(item.link);
+    const listingUrlNormalized = canonicalizeEtsyUrl(item.link);
     listingUrlLocaleForLog = listingUrlLocale;
     listingUrlNormalizedForLog = listingUrlNormalized;
 
@@ -1096,7 +1096,7 @@ async function postInstagramItem(item: FeedItem): Promise<{ ok: boolean; igId: s
     }
 
     const listingUrlLocale = extractEtsyListingLocaleFromUrl(item.link);
-    const listingUrlNormalized = canonicalizeEtsyListingUrl(item.link);
+    const listingUrlNormalized = canonicalizeEtsyUrl(item.link);
     listingUrlLocaleForLog = listingUrlLocale;
     listingUrlNormalizedForLog = listingUrlNormalized;
 

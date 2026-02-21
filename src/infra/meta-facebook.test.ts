@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  canonicalizeEtsyUrl,
   canonicalizeEtsyListingUrl,
   postFacebookPageEtsyListing,
   postFacebookPagePhoto,
@@ -32,6 +33,16 @@ describe("canonicalizeEtsyListingUrl", () => {
     expect(() => canonicalizeEtsyListingUrl("https://www.etsy.com/shop/MyShop")).toThrow(
       /Not a listing URL/,
     );
+  });
+});
+
+describe("canonicalizeEtsyUrl", () => {
+  it("strips locale prefixes and query params", () => {
+    expect(
+      canonicalizeEtsyUrl(
+        "https://www.etsy.com/nl/listing/1234567890/vintage-vase?utm_source=x&ref=y#reviews",
+      ),
+    ).toBe("https://www.etsy.com/listing/1234567890/vintage-vase");
   });
 });
 
