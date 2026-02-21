@@ -2,7 +2,11 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { dirname } from "node:path";
 import { extractEtsyListingImageUrlFromHtml, extractEtsyRssImageUrl } from "../infra/etsy.js";
-import { canonicalizeEtsyListingUrl, postFacebookPageEtsyListing } from "../infra/meta-facebook.js";
+import {
+  canonicalizeEtsyListingUrl,
+  postFacebookPageEtsyListing,
+  postFacebookPagePhoto,
+} from "../infra/meta-facebook.js";
 import {
   fetchMePermissions,
   type InstagramBusinessAccount,
@@ -12,6 +16,7 @@ import {
   resolveFacebookPageAccessToken,
   resolveInstagramBusinessAccount,
 } from "../infra/meta-instagram.js";
+import { extractRssImgSrc } from "../infra/rss.js";
 
 const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
 const TELEGRAM_POLL_TIMEOUT_SECONDS = 25;
@@ -30,6 +35,9 @@ const ETSY_SHOP_RSS_URL = process.env.ETSY_SHOP_RSS_URL?.trim() ?? "";
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN?.trim() ?? "";
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID?.trim() ?? "";
 const TELEGRAM_POLLING_ENABLED = process.env.RUN_TELEGRAM_POLLING === "true";
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY?.trim() ?? "";
+const RSS_TRANSLATION_OPENAI_MODEL =
+  process.env.RSS_TRANSLATION_OPENAI_MODEL?.trim() ?? "gpt-4o-mini";
 const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN?.trim() ?? "";
 const META_PAGE_ACCESS_TOKEN = process.env.META_PAGE_ACCESS_TOKEN?.trim() ?? "";
 const META_PAGE_ID = process.env.META_PAGE_ID?.trim() ?? "";
@@ -196,6 +204,145 @@ function decodeXmlEntities(raw: string): string {
       const code = Number.parseInt(dec, 10);
       return Number.isFinite(code) ? String.fromCodePoint(code) : "";
     });
+}
+
+const DUTCH_CAPTION_PATTERNS: RegExp[] = [
+  /\b(de|het|een|en|van|met|voor|door|uit|bij|als|op|te|niet|wel|maar|ook|nog|naar|om|dat|die|dit|deze|zijn|haar|mijn|jouw|onze|jullie)\b/i,
+  /\b(maat|kleur|staat|verzending|kosten|kijk|beschrijving)\b/i,
+  /\b(glazen|vaas|vazen|schaal|schalen|bord|borden|kopje|kopjes|schotel|schoteltje|servies|porselein|kristal|kristallen|antiek|handgemaakt|handbeschilderd)\b/i,
+  /\b(italiaanse|franse|keramische|dessertglazen|aardewerk|beeldje|zeldzaam|prachtig|mooi)\b/i,
+  /\b(vintage)\s+(italiaanse|franse|keramische|dessertglazen|aardewerk|beeldje|set|middel|zeldzaam|mooi)\b/i,
+  /ij/i, // catches lots of Dutch words containing "ij"
+];
+
+function stripHtmlToText(raw: string | undefined): string {
+  const input = typeof raw === "string" ? raw.trim() : "";
+  if (!input) {
+    return "";
+  }
+
+  return input
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p\s*>/gi, "\n")
+    .replace(/<\/div\s*>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
+function truncateText(input: string, maxLength: number): string {
+  const text = input.trim();
+  if (!text) {
+    return "";
+  }
+  if (!Number.isFinite(maxLength) || maxLength <= 0) {
+    return "";
+  }
+  if (text.length <= maxLength) {
+    return text;
+  }
+  if (maxLength <= 1) {
+    return text.slice(0, maxLength);
+  }
+  return `${text.slice(0, maxLength - 1).trimEnd()}…`;
+}
+
+function detectCaptionLanguage(text: string): "en" | "nl" {
+  const trimmed = (text || "").trim();
+  if (!trimmed) {
+    return "en";
+  }
+
+  for (const pattern of DUTCH_CAPTION_PATTERNS) {
+    if (pattern.test(trimmed)) {
+      return "nl";
+    }
+  }
+
+  return "en";
+}
+
+function extractEtsyListingLocaleFromUrl(raw: string): string | null {
+  const input = raw.trim();
+  if (!input) {
+    return null;
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(input);
+  } catch {
+    return null;
+  }
+
+  const hostname = parsed.hostname.trim().toLowerCase();
+  if (hostname === "etsy.me" || !hostname.endsWith("etsy.com")) {
+    return null;
+  }
+
+  const match = /^\/([a-z]{2})(?:-[a-z]{2})?\/listing\//i.exec(parsed.pathname);
+  return match?.[1] ? match[1].toLowerCase() : null;
+}
+
+async function translateTextToEnglish(params: { text: string }): Promise<string | null> {
+  const text = params.text.trim();
+  if (!text || !OPENAI_API_KEY) {
+    return null;
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12_000).unref();
+
+  try {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${OPENAI_API_KEY}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: RSS_TRANSLATION_OPENAI_MODEL,
+        temperature: 0.2,
+        max_tokens: 240,
+        messages: [
+          {
+            role: "system",
+            content:
+              "Translate the user-provided text to natural US English. Output ONLY the translation, with no preface and no quotation marks. Do not include any URLs.",
+          },
+          { role: "user", content: text },
+        ],
+      }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const json = (await response.json().catch(() => null)) as {
+      choices?: Array<{
+        message?: { content?: string | null } | null;
+      }>;
+    } | null;
+
+    const translated = json?.choices?.[0]?.message?.content;
+    if (typeof translated !== "string") {
+      return null;
+    }
+
+    const trimmed = translated.trim();
+    return trimmed ? trimmed : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function findTagText(block: string, tags: string[]): string {
@@ -607,45 +754,143 @@ async function postFacebookItem(item: FeedItem): Promise<void> {
     return;
   }
 
+  let listingUrlNormalizedForLog: string | null = null;
+  let listingUrlLocaleForLog: string | null = null;
+  let imageHostForLog: string | null = null;
+  let imageSourceForLog: string | null = null;
+  let captionSourceForLog: string | null = null;
+  let langDetectedForLog: string | null = null;
+  let translationAppliedForLog: boolean | null = null;
+  let publishMethodForLog: string | null = null;
+
   try {
     const pageToken = await resolveMetaPageTokenOnce();
+    const listingUrlLocale = extractEtsyListingLocaleFromUrl(item.link);
+    const listingUrlNormalized = canonicalizeEtsyListingUrl(item.link);
+    listingUrlLocaleForLog = listingUrlLocale;
+    listingUrlNormalizedForLog = listingUrlNormalized;
+
+    const title = item.title.trim();
+    const descriptionText = stripHtmlToText(item.description);
+    const descriptionSnippet = truncateText(descriptionText, 240);
+
+    const captionCandidate =
+      title && descriptionSnippet
+        ? `${title}\n\n${descriptionSnippet}`
+        : title
+          ? title
+          : descriptionSnippet;
+
+    const captionSource = title
+      ? descriptionSnippet
+        ? "rss_title_description"
+        : "rss_title"
+      : descriptionSnippet
+        ? "rss_description"
+        : "fallback_generic_en";
+
+    let finalCaption = captionCandidate || "New vintage item is live in the shop.";
+    captionSourceForLog = captionSource;
+
+    let langDetected = detectCaptionLanguage(finalCaption);
+    if (langDetected === "en" && listingUrlLocale === "nl") {
+      langDetected = "nl";
+    }
+    langDetectedForLog = langDetected;
+
+    let translationApplied = false;
+    if (langDetected !== "en") {
+      const translated = await translateTextToEnglish({ text: finalCaption });
+      if (translated) {
+        finalCaption = translated;
+        translationApplied = true;
+      } else {
+        finalCaption = "New vintage item is live in the shop.";
+      }
+    }
+
+    translationAppliedForLog = translationApplied;
+
+    const imageUrl = extractRssImgSrc(item.description);
+    imageSourceForLog = imageUrl ? "rss_description_img" : "missing";
+    imageHostForLog = urlHostOrNull(imageUrl);
+    publishMethodForLog = imageUrl ? "photos" : "feed";
+
     logMeta("facebook_publish_attempt", {
       feedItemId: item.id,
       pageId: META_PAGE_ID,
       tokenSource: pageToken.source,
       tokenFingerprint: pageToken.fingerprint,
-      listingUrl: item.link,
+      listingUrlNormalized,
+      urlLocale: listingUrlLocale,
+      imageHost: imageHostForLog,
+      imageSource: imageSourceForLog,
+      publishMethod: publishMethodForLog,
+      captionSource,
+      langDetected,
+      translationApplied,
+      captionPreview: finalCaption.slice(0, 120),
     });
 
-    const result = await postFacebookPageEtsyListing({
-      pageId: META_PAGE_ID,
-      accessToken: pageToken.token,
-      message: item.title,
-      etsyListingUrl: item.link,
-      verifyAttachment: RSS_FACEBOOK_VERIFY_ATTACHMENT,
-      verifyRetryDelayMs: RSS_FACEBOOK_VERIFY_DELAY_MS ?? 15_000,
-    });
+    if (imageUrl) {
+      const result = await postFacebookPagePhoto({
+        pageId: META_PAGE_ID,
+        accessToken: pageToken.token,
+        imageUrl,
+        caption: `${finalCaption}\n${listingUrlNormalized}`,
+      });
 
-    const attachmentStatus =
-      result.attachmentVerification?.hasAttachment === true
-        ? "attachment=ok"
-        : result.attachmentVerification?.hasAttachment === false
-          ? "attachment=missing"
-          : result.attachmentVerification?.hasAttachment === null
-            ? "attachment=unknown"
-            : "attachment=unchecked";
+      const id = result.postId ?? result.photoId;
+      console.log(
+        `[rss] Facebook photo created: id=${id} photo_id=${result.photoId} post_id=${result.postId ?? "<none>"}`,
+      );
+      logMeta("facebook_publish_ok", {
+        pageId: META_PAGE_ID,
+        publishMethod: "photos",
+        id,
+        photoId: result.photoId,
+        postId: result.postId,
+      });
+    } else {
+      const result = await postFacebookPageEtsyListing({
+        pageId: META_PAGE_ID,
+        accessToken: pageToken.token,
+        message: finalCaption,
+        etsyListingUrl: listingUrlNormalized,
+        verifyAttachment: RSS_FACEBOOK_VERIFY_ATTACHMENT,
+        verifyRetryDelayMs: RSS_FACEBOOK_VERIFY_DELAY_MS ?? 15_000,
+      });
 
-    console.log(`[rss] Facebook post created: id=${result.postId} ${attachmentStatus}`);
-    logMeta("facebook_publish_ok", {
-      pageId: META_PAGE_ID,
-      postId: result.postId,
-      attachmentStatus,
-    });
+      const attachmentStatus =
+        result.attachmentVerification?.hasAttachment === true
+          ? "attachment=ok"
+          : result.attachmentVerification?.hasAttachment === false
+            ? "attachment=missing"
+            : result.attachmentVerification?.hasAttachment === null
+              ? "attachment=unknown"
+              : "attachment=unchecked";
+
+      console.log(`[rss] Facebook post created: id=${result.postId} ${attachmentStatus}`);
+      logMeta("facebook_publish_ok", {
+        pageId: META_PAGE_ID,
+        publishMethod: "feed",
+        postId: result.postId,
+        attachmentStatus,
+      });
+    }
   } catch (error) {
     console.log(`[rss] Facebook post failed: ${String(error)}`);
     logMeta("facebook_publish_failed", {
       feedItemId: item.id,
       pageId: META_PAGE_ID,
+      listingUrlNormalized: listingUrlNormalizedForLog,
+      urlLocale: listingUrlLocaleForLog,
+      imageHost: imageHostForLog,
+      imageSource: imageSourceForLog,
+      captionSource: captionSourceForLog,
+      langDetected: langDetectedForLog,
+      translationApplied: translationAppliedForLog,
+      publishMethod: publishMethodForLog,
       error: String(error),
     });
   }
@@ -825,10 +1070,14 @@ async function postInstagramItem(item: FeedItem): Promise<{ ok: boolean; igId: s
 
   let igId: string | null = null;
   let listingUrlNormalizedForLog: string | null = null;
+  let listingUrlLocaleForLog: string | null = null;
   let imageHostForLog: string | null = null;
   let imageSourceForLog: string | null = null;
   let tokenSourceForLog: string | null = null;
   let tokenFingerprintForLog: string | null = null;
+  let captionSourceForLog: string | null = null;
+  let langDetectedForLog: string | null = null;
+  let translationAppliedForLog: boolean | null = null;
   try {
     await logMetaTokenPermissionsOnce();
 
@@ -846,9 +1095,51 @@ async function postInstagramItem(item: FeedItem): Promise<{ ok: boolean; igId: s
       return { ok: false, igId: null };
     }
 
-    const caption = item.title.trim();
+    const listingUrlLocale = extractEtsyListingLocaleFromUrl(item.link);
     const listingUrlNormalized = canonicalizeEtsyListingUrl(item.link);
+    listingUrlLocaleForLog = listingUrlLocale;
     listingUrlNormalizedForLog = listingUrlNormalized;
+
+    const title = item.title.trim();
+    const descriptionText = stripHtmlToText(item.description);
+    const descriptionSnippet = truncateText(descriptionText, 180);
+
+    const captionCandidate =
+      title && descriptionSnippet
+        ? `${title}\n\n${descriptionSnippet}`
+        : title
+          ? title
+          : descriptionSnippet;
+
+    const captionSource = title
+      ? descriptionSnippet
+        ? "rss_title_description"
+        : "rss_title"
+      : descriptionSnippet
+        ? "rss_description"
+        : "fallback_generic_en";
+
+    captionSourceForLog = captionSource;
+
+    let caption = captionCandidate || "New vintage item is live in the shop.";
+
+    let langDetected = detectCaptionLanguage(caption);
+    if (langDetected === "en" && listingUrlLocale === "nl") {
+      langDetected = "nl";
+    }
+    langDetectedForLog = langDetected;
+
+    let translationApplied = false;
+    if (langDetected !== "en") {
+      const translated = await translateTextToEnglish({ text: caption });
+      if (translated) {
+        caption = translated;
+        translationApplied = true;
+      } else {
+        caption = "New vintage item is live in the shop.";
+      }
+    }
+    translationAppliedForLog = translationApplied;
 
     let imageUrl: string;
     if (RSS_INSTAGRAM_IMAGE_URL_OVERRIDE) {
@@ -876,8 +1167,12 @@ async function postInstagramItem(item: FeedItem): Promise<{ ok: boolean; igId: s
       tokenSource: pageToken.source,
       tokenFingerprint: pageToken.fingerprint,
       listingUrlNormalized,
+      urlLocale: listingUrlLocale,
       imageHost: imageHostForLog,
       imageSource: imageSourceForLog,
+      captionSource,
+      langDetected,
+      translationApplied,
       captionPreview: caption.slice(0, 120),
     });
 
@@ -909,8 +1204,12 @@ async function postInstagramItem(item: FeedItem): Promise<{ ok: boolean; igId: s
         igId,
         tokenSource: tokenSourceForLog,
         tokenFingerprint: tokenFingerprintForLog,
+        urlLocale: listingUrlLocaleForLog,
         imageHost: imageHostForLog,
         imageSource: imageSourceForLog,
+        captionSource: captionSourceForLog,
+        langDetected: langDetectedForLog,
+        translationApplied: translationAppliedForLog,
         request: { method: error.method, url: error.url },
         status: error.status,
         error: error.error,
@@ -925,8 +1224,12 @@ async function postInstagramItem(item: FeedItem): Promise<{ ok: boolean; igId: s
       igId,
       tokenSource: tokenSourceForLog,
       tokenFingerprint: tokenFingerprintForLog,
+      urlLocale: listingUrlLocaleForLog,
       imageHost: imageHostForLog,
       imageSource: imageSourceForLog,
+      captionSource: captionSourceForLog,
+      langDetected: langDetectedForLog,
+      translationApplied: translationAppliedForLog,
       error: String(error),
     });
     return { ok: false, igId };

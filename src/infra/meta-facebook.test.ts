@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { canonicalizeEtsyListingUrl, postFacebookPageEtsyListing } from "./meta-facebook.js";
+import {
+  canonicalizeEtsyListingUrl,
+  postFacebookPageEtsyListing,
+  postFacebookPagePhoto,
+} from "./meta-facebook.js";
 
 describe("canonicalizeEtsyListingUrl", () => {
   it("normalizes Etsy listing URLs and strips query/hash", () => {
@@ -120,5 +124,52 @@ describe("postFacebookPageEtsyListing", () => {
     );
 
     vi.useRealTimers();
+  });
+});
+
+describe("postFacebookPagePhoto", () => {
+  it("POSTs /photos with url + caption and returns the Graph id", async () => {
+    const fetchMock = vi.fn();
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ id: "photo_123", post_id: "123_456" }),
+    } as Response);
+
+    const result = await postFacebookPagePhoto({
+      pageId: "123",
+      accessToken: "token",
+      imageUrl: "https://i.etsystatic.com/12345/r/il_rss.jpg",
+      caption: "A beautiful vintage vase.\nhttps://www.etsy.com/listing/1234567890/vintage-vase",
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+
+    expect(result).toEqual({
+      photoId: "photo_123",
+      postId: "123_456",
+      caption: "A beautiful vintage vase.\nhttps://www.etsy.com/listing/1234567890/vintage-vase",
+      imageUrl: "https://i.etsystatic.com/12345/r/il_rss.jpg",
+    });
+
+    const [requestUrl, requestInit] = fetchMock.mock.calls[0] ?? [];
+    expect(String(requestUrl)).toBe("https://graph.facebook.com/v18.0/123/photos");
+    expect(requestInit).toEqual(
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({
+          Authorization: "Bearer token",
+          "content-type": "application/x-www-form-urlencoded",
+        }),
+      }),
+    );
+
+    const body = requestInit?.body as URLSearchParams;
+    expect(body.toString()).toContain(
+      "url=https%3A%2F%2Fi.etsystatic.com%2F12345%2Fr%2Fil_rss.jpg",
+    );
+    expect(body.toString()).toContain("published=true");
+    expect(body.toString()).toContain(
+      "caption=A+beautiful+vintage+vase.%0Ahttps%3A%2F%2Fwww.etsy.com%2Flisting%2F1234567890%2Fvintage-vase",
+    );
   });
 });

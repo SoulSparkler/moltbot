@@ -20,6 +20,13 @@ export type FacebookPageEtsyListingPostResult = {
   attachmentVerification?: FacebookAttachmentVerificationResult;
 };
 
+export type FacebookPagePhotoPostResult = {
+  photoId: string;
+  postId: string | null;
+  caption: string;
+  imageUrl: string;
+};
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object") {
     return null;
@@ -107,6 +114,26 @@ export function canonicalizeEtsyListingUrl(raw: string): string {
   parsed.pathname = slug ? `/listing/${listingId}/${slug}` : `/listing/${listingId}`;
   parsed.search = "";
   parsed.hash = "";
+
+  return parsed.toString();
+}
+
+function normalizeGraphHttpUrl(raw: string, label: string): string {
+  const input = raw.trim();
+  if (!input) {
+    throw new Error(`META_GRAPH_INVALID_URL: ${label} is empty.`);
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(input);
+  } catch {
+    throw new Error(`META_GRAPH_INVALID_URL: Unable to parse ${label}: "${raw}"`);
+  }
+
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`META_GRAPH_INVALID_URL: ${label} must be http(s): "${raw}"`);
+  }
 
   return parsed.toString();
 }
@@ -306,5 +333,71 @@ export async function postFacebookPageEtsyListing(params: {
       hasAttachment: second,
       retried: true,
     },
+  };
+}
+
+export async function postFacebookPagePhoto(params: {
+  pageId: string;
+  accessToken: string;
+  imageUrl: string;
+  caption: string;
+  fetchImpl?: typeof fetch;
+}): Promise<FacebookPagePhotoPostResult> {
+  const fetchImpl = params.fetchImpl ?? globalThis.fetch;
+  if (!fetchImpl) {
+    throw new Error("META_GRAPH_UNAVAILABLE: fetch is not available in this runtime.");
+  }
+
+  const pageId = params.pageId.trim();
+  if (!pageId) {
+    throw new Error("META_GRAPH_CONFIG_INVALID: pageId is missing.");
+  }
+
+  const accessToken = params.accessToken.trim();
+  if (!accessToken) {
+    throw new Error("META_GRAPH_CONFIG_INVALID: accessToken is missing.");
+  }
+
+  const imageUrl = normalizeGraphHttpUrl(params.imageUrl, "imageUrl");
+  const caption = (params.caption || "").trim();
+
+  const url = `${META_GRAPH_API_BASE}/${encodeURIComponent(pageId)}/photos`;
+  const body = new URLSearchParams({
+    url: imageUrl,
+    published: "true",
+    ...(caption ? { caption } : {}),
+  });
+
+  const response = await fetchGraph(fetchImpl, {
+    url,
+    method: "POST",
+    accessToken,
+    body,
+    contentType: "application/x-www-form-urlencoded",
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      formatGraphErrorMessage({ response, fallback: "META_GRAPH_POST_FAILED: create_photo_post" }),
+    );
+  }
+
+  const photoId = toStringValue(response.body?.id);
+  if (!photoId) {
+    throw new Error(
+      formatGraphErrorMessage({
+        response,
+        fallback: "META_GRAPH_POST_FAILED: create_photo_post_missing_id",
+      }),
+    );
+  }
+
+  const postId = toStringValue(response.body?.post_id);
+
+  return {
+    photoId,
+    postId: postId ?? null,
+    caption,
+    imageUrl,
   };
 }
