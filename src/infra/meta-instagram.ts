@@ -97,6 +97,13 @@ function toStringValue(value: unknown): string | null {
   return null;
 }
 
+function sleep(ms: number): Promise<void> {
+  if (!Number.isFinite(ms) || ms <= 0) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function fetchGraph(
   fetchImpl: typeof fetch,
   params: {
@@ -152,7 +159,8 @@ export function summarizeGraphError(
   const fbtraceId = toStringValue(error.fbtrace_id);
   const userTitle = toStringValue(error.error_user_title);
   const userMessage = toStringValue(error.error_user_msg);
-  const isTransient = typeof error.is_transient === "boolean" ? error.is_transient : null;
+  const isTransientValue = error.is_transient ?? error.isTransient;
+  const isTransient = typeof isTransientValue === "boolean" ? isTransientValue : null;
 
   return {
     message,
@@ -188,6 +196,86 @@ function formatGraphErrorMessage(params: {
     pieces.push(`response=${params.response.text.trim().slice(0, 300)}`);
   }
   return `${params.fallback} (${pieces.join(" ")})`;
+}
+
+const INSTAGRAM_PUBLISH_RETRY_DELAYS_MS = [2_000, 8_000, 20_000] as const;
+const INSTAGRAM_PUBLISH_MAX_ATTEMPTS = INSTAGRAM_PUBLISH_RETRY_DELAYS_MS.length + 1;
+
+function isInstagramPublishRetryable(response: MetaGraphResponse): {
+  retryable: boolean;
+  error: MetaGraphErrorSummary | null;
+} {
+  const error = summarizeGraphError(response.body);
+  if (response.status >= 500) {
+    return { retryable: true, error };
+  }
+  if (error?.code === "2") {
+    return { retryable: true, error };
+  }
+  if (error?.isTransient === true) {
+    return { retryable: true, error };
+  }
+  return { retryable: false, error };
+}
+
+function instagramPublishRetryDelayMs(attempt: number): number {
+  const base = INSTAGRAM_PUBLISH_RETRY_DELAYS_MS[Math.max(0, Math.min(attempt - 1, 2))] ?? 0;
+  const jitter = Math.round(Math.random() * 1000) - 500;
+  return Math.max(0, base + jitter);
+}
+
+async function fetchGraphWithInstagramPublishRetry(
+  fetchImpl: typeof fetch,
+  params: {
+    url: string;
+    method: "POST";
+    accessToken: string;
+    body: BodyInit;
+    contentType: string;
+    operation: "create_container" | "publish_container";
+  },
+): Promise<MetaGraphResponse> {
+  let lastResponse: MetaGraphResponse | null = null;
+
+  for (let attempt = 1; attempt <= INSTAGRAM_PUBLISH_MAX_ATTEMPTS; attempt += 1) {
+    const response = await fetchGraph(fetchImpl, {
+      url: params.url,
+      method: params.method,
+      accessToken: params.accessToken,
+      body: params.body,
+      contentType: params.contentType,
+    });
+    lastResponse = response;
+
+    if (response.ok) {
+      return response;
+    }
+
+    const retry = isInstagramPublishRetryable(response);
+    if (!retry.retryable || attempt >= INSTAGRAM_PUBLISH_MAX_ATTEMPTS) {
+      if (retry.retryable) {
+        console.error(
+          `[meta][ig] give_up op=${params.operation} attempts=${attempt}/${INSTAGRAM_PUBLISH_MAX_ATTEMPTS} status=${response.status} fbtrace_id=${retry.error?.fbtraceId ?? "<missing>"}`,
+        );
+      }
+      return response;
+    }
+
+    const delayMs = instagramPublishRetryDelayMs(attempt);
+    console.warn(
+      `[meta][ig] retry op=${params.operation} attempt=${attempt + 1}/${INSTAGRAM_PUBLISH_MAX_ATTEMPTS} delay_ms=${delayMs} status=${response.status} fbtrace_id=${retry.error?.fbtraceId ?? "<missing>"}`,
+    );
+    await sleep(delayMs);
+  }
+
+  return (
+    lastResponse ?? {
+      ok: false,
+      status: 0,
+      text: "",
+      body: null,
+    }
+  );
 }
 
 export async function resolveFacebookPageAccessToken(params: {
@@ -394,12 +482,13 @@ async function createInstagramContainer(params: {
     ...(params.caption?.trim() ? { caption: params.caption.trim() } : {}),
   });
 
-  const response = await fetchGraph(params.fetchImpl, {
+  const response = await fetchGraphWithInstagramPublishRetry(params.fetchImpl, {
     url,
     method: "POST",
     accessToken: params.accessToken,
     body,
     contentType: "application/x-www-form-urlencoded",
+    operation: "create_container",
   });
 
   if (!response.ok) {
@@ -465,12 +554,13 @@ async function publishInstagramContainer(params: {
 }): Promise<string> {
   const url = `${META_GRAPH_API_BASE}/${encodeURIComponent(params.igUserId)}/media_publish`;
   const body = new URLSearchParams({ creation_id: params.creationId });
-  const response = await fetchGraph(params.fetchImpl, {
+  const response = await fetchGraphWithInstagramPublishRetry(params.fetchImpl, {
     url,
     method: "POST",
     accessToken: params.accessToken,
     body,
     contentType: "application/x-www-form-urlencoded",
+    operation: "publish_container",
   });
 
   if (!response.ok) {

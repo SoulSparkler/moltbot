@@ -169,4 +169,186 @@ describe("publishInstagramPhoto", () => {
     expect(err.error?.fbtraceId).toBe("trace");
     expect(err.error?.message).toBe("Bad token");
   });
+
+  it("retries transient errors when creating a container", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0.5);
+
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        text: async () =>
+          JSON.stringify({
+            error: {
+              message: "An unexpected error has occurred. Please retry later.",
+              code: 2,
+              is_transient: true,
+              fbtrace_id: "trace",
+            },
+          }),
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ id: "creation123" }),
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ id: "media456" }),
+      } as Response);
+
+    const promise = publishInstagramPhoto({
+      igUserId: "ig123",
+      accessToken: "page-token",
+      imageUrl: "https://example.com/image.jpg",
+      caption: "Hello",
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      pollUntilFinished: false,
+    });
+
+    await vi.runAllTimersAsync();
+
+    await expect(promise).resolves.toEqual({
+      igUserId: "ig123",
+      creationId: "creation123",
+      mediaId: "media456",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("retry op=create_container attempt=2/4 delay_ms=2000 status=500"),
+    );
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("fbtrace_id=trace"));
+    expect(errorSpy).not.toHaveBeenCalled();
+
+    randomSpy.mockRestore();
+    warnSpy.mockRestore();
+    errorSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
+  it("retries transient errors when publishing a container", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0.5);
+
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ id: "creation123" }),
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        text: async () =>
+          JSON.stringify({
+            error: {
+              message: "An unexpected error has occurred. Please retry later.",
+              code: 2,
+              is_transient: true,
+              fbtrace_id: "trace",
+            },
+          }),
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ id: "media456" }),
+      } as Response);
+
+    const promise = publishInstagramPhoto({
+      igUserId: "ig123",
+      accessToken: "page-token",
+      imageUrl: "https://example.com/image.jpg",
+      caption: "Hello",
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      pollUntilFinished: false,
+    });
+
+    await vi.runAllTimersAsync();
+
+    await expect(promise).resolves.toEqual({
+      igUserId: "ig123",
+      creationId: "creation123",
+      mediaId: "media456",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("retry op=publish_container attempt=2/4 delay_ms=2000 status=500"),
+    );
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("fbtrace_id=trace"));
+    expect(errorSpy).not.toHaveBeenCalled();
+
+    randomSpy.mockRestore();
+    warnSpy.mockRestore();
+    errorSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
+  it("gives up after exhausting transient publish retries", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0.5);
+
+    const transientErrorResponse = {
+      ok: false,
+      status: 500,
+      text: async () =>
+        JSON.stringify({
+          error: {
+            message: "An unexpected error has occurred. Please retry later.",
+            code: 2,
+            is_transient: true,
+            fbtrace_id: "trace",
+          },
+        }),
+    } as Response;
+
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ id: "creation123" }),
+      } as Response)
+      .mockResolvedValueOnce(transientErrorResponse)
+      .mockResolvedValueOnce(transientErrorResponse)
+      .mockResolvedValueOnce(transientErrorResponse)
+      .mockResolvedValueOnce(transientErrorResponse);
+
+    const promise = publishInstagramPhoto({
+      igUserId: "ig123",
+      accessToken: "page-token",
+      imageUrl: "https://example.com/image.jpg",
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      pollUntilFinished: false,
+    });
+    const handled = promise.then(
+      () => null,
+      (err) => err,
+    );
+
+    await vi.runAllTimersAsync();
+
+    await expect(handled).resolves.toBeInstanceOf(MetaGraphRequestError);
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(warnSpy).toHaveBeenCalledTimes(3);
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("give_up op=publish_container attempts=4/4 status=500"),
+    );
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("fbtrace_id=trace"));
+
+    randomSpy.mockRestore();
+    warnSpy.mockRestore();
+    errorSpy.mockRestore();
+    vi.useRealTimers();
+  });
 });

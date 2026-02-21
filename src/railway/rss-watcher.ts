@@ -778,7 +778,7 @@ async function postFacebookItem(item: FeedItem): Promise<void> {
   let publishMethodForLog: string | null = null;
 
   try {
-    const rawListingUrlOrFeedItemId = item.link?.trim() ? item.link : item.id;
+    const rawListingUrlOrFeedItemId = item.link.trim() ? item.link : item.id;
     const canonicalListingUrl = canonicalizeEtsyUrl(rawListingUrlOrFeedItemId);
     canonicalListingUrlForLog = canonicalListingUrl;
 
@@ -870,6 +870,7 @@ async function postFacebookItem(item: FeedItem): Promise<void> {
         id,
         photoId: result.photoId,
         postId: result.postId,
+        listingUrl: canonicalListingUrl,
         postedUrl: canonicalListingUrl,
       });
     } else {
@@ -897,6 +898,7 @@ async function postFacebookItem(item: FeedItem): Promise<void> {
         publishMethod: "feed",
         postId: result.postId,
         attachmentStatus,
+        listingUrl: canonicalListingUrl,
         postedUrl: canonicalListingUrl,
       });
     }
@@ -1079,20 +1081,18 @@ async function resolveEtsyListingImageUrl(listingUrlNormalized: string): Promise
   return { listingUrlNormalized, imageUrl: extracted.url, imageSource: extracted.source };
 }
 
-async function postInstagramItem(item: FeedItem): Promise<{ ok: boolean; igId: string | null }> {
+async function postInstagramItem(
+  item: FeedItem,
+): Promise<{ ok: boolean; igId: string | null; attempted: boolean }> {
   if (!instagramEnabled()) {
     console.log("[rss] instagram disabled; skipping");
-    return { ok: true, igId: null };
+    return { ok: true, igId: null, attempted: false };
   }
 
-  if (!item.link) {
-    console.log(`[rss] Instagram post skipped: missing item.link for "${item.title}"`);
-    return { ok: false, igId: null };
-  }
   console.log("[rss] instagram enabled; attempting publish");
 
   let igId: string | null = null;
-  let listingUrlNormalizedForLog: string | null = null;
+  let canonicalListingUrlForLog: string | null = null;
   let listingUrlLocaleForLog: string | null = null;
   let imageHostForLog: string | null = null;
   let imageSourceForLog: string | null = null;
@@ -1115,13 +1115,16 @@ async function postInstagramItem(item: FeedItem): Promise<{ ok: boolean; igId: s
         reason:
           "instagram_business_account missing (Page not linked to an Instagram business/pro account)",
       });
-      return { ok: false, igId: null };
+      return { ok: false, igId: null, attempted: true };
     }
 
-    const listingUrlLocale = extractEtsyListingLocaleFromUrl(item.link);
-    const listingUrlNormalized = canonicalizeEtsyUrl(item.link);
+    const rawListingUrlOrFeedItemId = item.link.trim() ? item.link : item.id;
+    const canonicalListingUrl = canonicalizeEtsyUrl(rawListingUrlOrFeedItemId);
+    canonicalListingUrlForLog = canonicalListingUrl;
+
+    const listingUrlLocale =
+      extractEtsyListingLocaleFromUrl(item.link) ?? extractEtsyListingLocaleFromUrl(item.id);
     listingUrlLocaleForLog = listingUrlLocale;
-    listingUrlNormalizedForLog = listingUrlNormalized;
 
     const title = item.title.trim();
     const descriptionText = stripHtmlToText(item.description);
@@ -1144,9 +1147,10 @@ async function postInstagramItem(item: FeedItem): Promise<{ ok: boolean; igId: s
 
     captionSourceForLog = captionSource;
 
-    let caption = captionCandidate || "New vintage item is live in the shop.";
+    let captionText =
+      stripUrlsFromText(captionCandidate) || "New vintage item is live in the shop.";
 
-    let langDetected = detectCaptionLanguage(caption);
+    let langDetected = detectCaptionLanguage(captionText);
     if (langDetected === "en" && listingUrlLocale === "nl") {
       langDetected = "nl";
     }
@@ -1154,14 +1158,19 @@ async function postInstagramItem(item: FeedItem): Promise<{ ok: boolean; igId: s
 
     let translationApplied = false;
     if (langDetected !== "en") {
-      const translated = await translateTextToEnglish({ text: caption });
+      const translated = await translateTextToEnglish({ text: captionText });
       if (translated) {
-        caption = translated;
+        captionText = translated;
         translationApplied = true;
       } else {
-        caption = "New vintage item is live in the shop.";
+        captionText = "New vintage item is live in the shop.";
       }
     }
+
+    captionText = stripUrlsFromText(captionText) || "New vintage item is live in the shop.";
+    const captionForPost = captionText
+      ? `${captionText}\n${canonicalListingUrl}`
+      : canonicalListingUrl;
     translationAppliedForLog = translationApplied;
 
     let imageUrl: string;
@@ -1174,8 +1183,8 @@ async function postInstagramItem(item: FeedItem): Promise<{ ok: boolean; igId: s
         imageUrl = extracted;
         imageSourceForLog = "rss_description_img";
       } else {
-        const resolved = await resolveEtsyListingImageUrl(listingUrlNormalized);
-        listingUrlNormalizedForLog = resolved.listingUrlNormalized;
+        const resolved = await resolveEtsyListingImageUrl(canonicalListingUrl);
+        canonicalListingUrlForLog = resolved.listingUrlNormalized;
         imageUrl = resolved.imageUrl;
         imageSourceForLog = resolved.imageSource;
       }
@@ -1189,21 +1198,22 @@ async function postInstagramItem(item: FeedItem): Promise<{ ok: boolean; igId: s
       igId: instagramBusiness.id,
       tokenSource: pageToken.source,
       tokenFingerprint: pageToken.fingerprint,
-      listingUrlNormalized,
+      listingUrl: canonicalListingUrl,
+      postedUrl: canonicalListingUrl,
       urlLocale: listingUrlLocale,
       imageHost: imageHostForLog,
       imageSource: imageSourceForLog,
       captionSource,
       langDetected,
       translationApplied,
-      captionPreview: caption.slice(0, 120),
+      captionPreview: captionText.slice(0, 120),
     });
 
     const result = await publishInstagramPhoto({
       igUserId: instagramBusiness.id,
       accessToken: pageToken.token,
       imageUrl,
-      caption,
+      caption: captionForPost,
       pollIntervalMs: RSS_INSTAGRAM_POLL_INTERVAL_MS ?? 2_000,
       pollTimeoutMs: RSS_INSTAGRAM_POLL_TIMEOUT_MS ?? 60_000,
     });
@@ -1214,15 +1224,18 @@ async function postInstagramItem(item: FeedItem): Promise<{ ok: boolean; igId: s
         igId: result.igUserId,
         creationId: result.creationId,
         mediaId: result.mediaId,
+        listingUrl: canonicalListingUrl,
+        postedUrl: canonicalListingUrl,
       });
     }
 
-    return { ok: true, igId: instagramBusiness.id };
+    return { ok: true, igId: instagramBusiness.id, attempted: true };
   } catch (error) {
     if (error instanceof MetaGraphRequestError) {
       logMeta("instagram_publish_failed", {
         feedItemId: item.id,
-        listingUrlNormalized: listingUrlNormalizedForLog,
+        listingUrl: canonicalListingUrlForLog,
+        postedUrl: canonicalListingUrlForLog,
         pageId: META_PAGE_ID,
         igId,
         tokenSource: tokenSourceForLog,
@@ -1237,12 +1250,13 @@ async function postInstagramItem(item: FeedItem): Promise<{ ok: boolean; igId: s
         status: error.status,
         error: error.error,
       });
-      return { ok: false, igId };
+      return { ok: false, igId, attempted: true };
     }
 
     logMeta("instagram_publish_failed", {
       feedItemId: item.id,
-      listingUrlNormalized: listingUrlNormalizedForLog,
+      listingUrl: canonicalListingUrlForLog,
+      postedUrl: canonicalListingUrlForLog,
       pageId: META_PAGE_ID,
       igId,
       tokenSource: tokenSourceForLog,
@@ -1255,7 +1269,7 @@ async function postInstagramItem(item: FeedItem): Promise<{ ok: boolean; igId: s
       translationApplied: translationAppliedForLog,
       error: String(error),
     });
-    return { ok: false, igId };
+    return { ok: false, igId, attempted: true };
   }
 }
 
@@ -1409,6 +1423,41 @@ function recordPostedItem(
   state.posted_at_by_id[params.itemId] = params.postedAtIso;
 }
 
+async function retryInstagramPublishFailures(params: {
+  items: FeedItem[];
+  failedIdsSnapshot: string[];
+}): Promise<void> {
+  if (!instagramEnabled()) {
+    return;
+  }
+
+  const failedIds = params.failedIdsSnapshot
+    .map((entry) => entry.trim())
+    .filter((entry) => Boolean(entry));
+  if (failedIds.length === 0) {
+    return;
+  }
+
+  const activeFailedSet = new Set(currentState.igFailedIds ?? []);
+  const retryId = failedIds.find((id) => activeFailedSet.has(id));
+  if (!retryId) {
+    return;
+  }
+
+  const item = params.items.find((candidate) => candidate.id === retryId);
+  if (!item) {
+    return;
+  }
+
+  const result = await postInstagramItem(item);
+  if (!result.attempted || !result.ok) {
+    return;
+  }
+
+  currentState.igFailedIds = (currentState.igFailedIds ?? []).filter((entry) => entry !== retryId);
+  await saveState(currentState);
+}
+
 async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<void> {
   await runMetaHealthcheck();
 
@@ -1426,6 +1475,7 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
       return;
     }
 
+    const igFailedIdsSnapshot = [...(currentState.igFailedIds ?? [])];
     const known = new Set(currentState.seenIds);
     const newItems = items.filter((item) => !known.has(item.id));
 
@@ -1442,6 +1492,8 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
 
     if (newItems.length === 0) {
       console.log(`[rss] ${trigger}: no new items.`);
+
+      await retryInstagramPublishFailures({ items, failedIdsSnapshot: igFailedIdsSnapshot });
 
       const nowMs = Date.now();
       const cooldownHours = Number.isFinite(ROTATION_COOLDOWN_HOURS)
@@ -1502,11 +1554,15 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
 
       await postFacebookItem(selection.item);
       const igResult = await postInstagramItem(selection.item);
-      if (!igResult.ok) {
+      if (igResult.attempted && !igResult.ok) {
         currentState.igFailedIds = [
           selection.item.id,
           ...(currentState.igFailedIds ?? []).filter((entry) => entry !== selection.item.id),
         ].slice(0, MAX_SEEN_IDS);
+      } else if (igResult.attempted) {
+        currentState.igFailedIds = (currentState.igFailedIds ?? []).filter(
+          (entry) => entry !== selection.item.id,
+        );
       }
 
       const postedAtIso = new Date().toISOString();
@@ -1529,11 +1585,15 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
         await sendTelegramText(formatFeedItemMessage(item));
         await postFacebookItem(item);
         const igResult = await postInstagramItem(item);
-        if (!igResult.ok) {
+        if (igResult.attempted && !igResult.ok) {
           currentState.igFailedIds = [
             item.id,
             ...(currentState.igFailedIds ?? []).filter((entry) => entry !== item.id),
           ].slice(0, MAX_SEEN_IDS);
+        } else if (igResult.attempted) {
+          currentState.igFailedIds = (currentState.igFailedIds ?? []).filter(
+            (entry) => entry !== item.id,
+          );
         }
         recordPostedItem(currentState, { itemId: item.id, postedAtIso: new Date().toISOString() });
       }
@@ -1545,15 +1605,21 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
       for (const item of sortedNew) {
         await postFacebookItem(item);
         const igResult = await postInstagramItem(item);
-        if (!igResult.ok) {
+        if (igResult.attempted && !igResult.ok) {
           currentState.igFailedIds = [
             item.id,
             ...(currentState.igFailedIds ?? []).filter((entry) => entry !== item.id),
           ].slice(0, MAX_SEEN_IDS);
+        } else if (igResult.attempted) {
+          currentState.igFailedIds = (currentState.igFailedIds ?? []).filter(
+            (entry) => entry !== item.id,
+          );
         }
         recordPostedItem(currentState, { itemId: item.id, postedAtIso: new Date().toISOString() });
       }
     }
+
+    await retryInstagramPublishFailures({ items, failedIdsSnapshot: igFailedIdsSnapshot });
 
     const merged = [...sortedNew.map((item) => item.id), ...currentState.seenIds];
     currentState.seenIds = Array.from(new Set(merged)).slice(0, MAX_SEEN_IDS);

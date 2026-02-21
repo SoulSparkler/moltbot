@@ -43,6 +43,10 @@ describe("canonicalizeEtsyUrl", () => {
         "https://www.etsy.com/nl/listing/1234567890/vintage-vase?utm_source=x&ref=y#reviews",
       ),
     ).toBe("https://www.etsy.com/listing/1234567890/vintage-vase");
+
+    expect(canonicalizeEtsyUrl("https://www.etsy.com/nl/listing/4458007567/abc?ref=rss")).toBe(
+      "https://www.etsy.com/listing/4458007567/abc",
+    );
   });
 });
 
