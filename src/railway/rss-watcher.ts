@@ -2,11 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { dirname } from "node:path";
 import { extractEtsyListingImageUrlFromHtml, extractEtsyRssImageUrl } from "../infra/etsy.js";
-import {
-  canonicalizeEtsyUrl,
-  postFacebookPageEtsyListing,
-  postFacebookPagePhoto,
-} from "../infra/meta-facebook.js";
+import { canonicalizeEtsyUrl, postFacebookPagePhoto } from "../infra/meta-facebook.js";
 import {
   fetchMePermissions,
   type InstagramBusinessAccount,
@@ -16,7 +12,6 @@ import {
   resolveFacebookPageAccessToken,
   resolveInstagramBusinessAccount,
 } from "../infra/meta-instagram.js";
-import { extractRssImgSrc } from "../infra/rss.js";
 
 const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
 const TELEGRAM_POLL_TIMEOUT_SECONDS = 25;
@@ -29,7 +24,6 @@ const META_REQUIRED_PERMISSIONS = [
   "instagram_basic",
   "instagram_content_publish",
 ] as const;
-const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 
 const ETSY_SHOP_RSS_URL = process.env.ETSY_SHOP_RSS_URL?.trim() ?? "";
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN?.trim() ?? "";
@@ -55,16 +49,17 @@ const RSS_INSTAGRAM_POLL_TIMEOUT_MS = toNumberOrUndefined(
   process.env.RSS_INSTAGRAM_POLL_TIMEOUT_MS,
 );
 const RSS_INSTAGRAM_TEST_IMAGE_URL = process.env.RSS_INSTAGRAM_TEST_IMAGE_URL?.trim() ?? "";
-const ROTATION_ENABLED = toBooleanOrUndefined(process.env.ROTATION_ENABLED) ?? false;
-const ROTATION_COOLDOWN_HOURS = toNumberOrUndefined(process.env.ROTATION_COOLDOWN_HOURS) ?? 24;
-const FORCE_ROTATION_POST = toBooleanOrUndefined(process.env.FORCE_ROTATION_POST) ?? false;
 const CHECK_INTERVAL_MS = resolveCheckIntervalMs(process.env.RSS_CHECK_INTERVAL_MS);
 const HEALTH_PORT = toNumberOrUndefined(process.env.PORT) ?? 8080;
 const RSS_DISABLE_HEALTH_SERVER = process.env.RSS_DISABLE_HEALTH_SERVER === "1";
+const MAX_POSTS_PER_DAY = Math.max(1, toNumberOrUndefined(process.env.MAX_POSTS_PER_DAY) ?? 1);
+const MIN_POST_INTERVAL_HOURS = toNumberOrUndefined(process.env.MIN_POST_INTERVAL_HOURS) ?? 24;
+const DEDUPE_DAYS = Math.max(1, toNumberOrUndefined(process.env.DEDUPE_DAYS) ?? 30);
+const MIN_POST_INTERVAL_MS = Math.max(0, MIN_POST_INTERVAL_HOURS * 60 * 60 * 1000);
+const DEDUPE_WINDOW_MS = DEDUPE_DAYS * 24 * 60 * 60 * 1000;
 let alertsEnabledMemo: boolean | null = null;
 let facebookEnabledMemo: boolean | null = null;
 let instagramEnabledMemo: boolean | null = null;
-let forceRotationConsumed = false;
 let metaPermissionsMemo: {
   ok: boolean;
   status: number;
@@ -96,6 +91,11 @@ type WatcherState = {
   last_rotation_at?: string;
   last_posted_id?: string;
   posted_at_by_id?: Record<string, string>;
+  last_successful_post_at?: string;
+  last_successful_fb_post_at?: string;
+  last_successful_ig_post_at?: string;
+  last_attempted_post_at?: string;
+  posted_listing_ids?: Record<string, string>;
 };
 
 type TelegramUpdatesResponse = {
@@ -416,6 +416,131 @@ function parseFeedItems(xml: string): FeedItem[] {
   return parsed.toSorted((a, b) => (b.publishedAtMs ?? 0) - (a.publishedAtMs ?? 0));
 }
 
+type ListingCandidate = FeedItem & {
+  listingId: string;
+  canonicalListingUrl: string;
+};
+
+type CaptionBuildResult = {
+  captionText: string;
+  captionSource: string;
+  langDetected: "en" | "nl";
+  translationApplied: boolean;
+};
+
+type ResolvedImage = {
+  imageUrl: string;
+  imageSource: string;
+  imageHost: string | null;
+};
+
+type PublishResult = {
+  attempted: boolean;
+  ok: boolean;
+  postId?: string | null;
+  photoId?: string | null;
+  creationId?: string | null;
+  publishId?: string | null;
+  status?: number | null;
+  fbtraceId?: string | null;
+  error?: unknown;
+  skippedReason?: string;
+};
+
+function toListingCandidate(item: FeedItem): ListingCandidate | null {
+  const listingId = extractListingId(item.link) ?? extractListingId(item.id);
+  if (!listingId) {
+    return null;
+  }
+
+  const rawUrl = item.link?.trim() || item.id?.trim() || "";
+  const fallbackUrl = `https://www.etsy.com/listing/${listingId}`;
+
+  let canonicalListingUrl: string;
+  try {
+    canonicalListingUrl = canonicalizeEtsyUrl(rawUrl || fallbackUrl);
+  } catch {
+    try {
+      canonicalListingUrl = canonicalizeEtsyUrl(fallbackUrl);
+    } catch {
+      return null;
+    }
+  }
+
+  return { ...item, listingId, canonicalListingUrl };
+}
+
+async function buildCaption(params: {
+  item: FeedItem;
+  canonicalListingUrl: string;
+}): Promise<CaptionBuildResult> {
+  const title = params.item.title.trim();
+  const descriptionText = stripHtmlToText(params.item.description);
+  const descriptionSnippet = truncateText(descriptionText, 200);
+
+  const captionCandidate =
+    title && descriptionSnippet ? `${title}\n\n${descriptionSnippet}` : title || descriptionSnippet;
+
+  const captionSource = title
+    ? descriptionSnippet
+      ? "rss_title_description"
+      : "rss_title"
+    : descriptionSnippet
+      ? "rss_description"
+      : "fallback_generic_en";
+
+  let captionText = stripUrlsFromText(captionCandidate) || "Listing available on Etsy.";
+
+  const listingUrlLocale =
+    extractEtsyListingLocaleFromUrl(params.item.link) ??
+    extractEtsyListingLocaleFromUrl(params.item.id);
+
+  let langDetected = detectCaptionLanguage(captionText);
+  if (langDetected === "en" && listingUrlLocale === "nl") {
+    langDetected = "nl";
+  }
+
+  let translationApplied = false;
+  if (langDetected !== "en") {
+    const translated = await translateTextToEnglish({ text: captionText });
+    if (translated) {
+      captionText = translated;
+      translationApplied = true;
+    } else {
+      captionText = "Listing available on Etsy.";
+    }
+  }
+
+  captionText = stripUrlsFromText(captionText) || "Listing available on Etsy.";
+
+  return { captionText, captionSource, langDetected, translationApplied };
+}
+
+async function resolveImageForItem(params: {
+  item: ListingCandidate;
+  canonicalListingUrl: string;
+}): Promise<ResolvedImage | null> {
+  const rssImage = extractEtsyRssImageUrl(params.item);
+  if (rssImage) {
+    return {
+      imageUrl: rssImage,
+      imageSource: "rss_description_img",
+      imageHost: urlHostOrNull(rssImage),
+    };
+  }
+
+  try {
+    const resolved = await resolveEtsyListingImageUrl(params.canonicalListingUrl);
+    return {
+      imageUrl: resolved.imageUrl,
+      imageSource: resolved.imageSource,
+      imageHost: urlHostOrNull(resolved.imageUrl),
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function loadState(): Promise<WatcherState> {
   try {
     const raw = await readFile(STATE_PATH, "utf8");
@@ -454,6 +579,42 @@ async function loadState(): Promise<WatcherState> {
               .filter((entry) => Boolean(entry[1])),
           )
         : undefined;
+    const lastSuccessfulPostAt =
+      typeof parsed.last_successful_post_at === "string" &&
+      Number.isFinite(Date.parse(parsed.last_successful_post_at))
+        ? parsed.last_successful_post_at
+        : undefined;
+    const lastSuccessfulFbPostAt =
+      typeof parsed.last_successful_fb_post_at === "string" &&
+      Number.isFinite(Date.parse(parsed.last_successful_fb_post_at))
+        ? parsed.last_successful_fb_post_at
+        : undefined;
+    const lastSuccessfulIgPostAt =
+      typeof parsed.last_successful_ig_post_at === "string" &&
+      Number.isFinite(Date.parse(parsed.last_successful_ig_post_at))
+        ? parsed.last_successful_ig_post_at
+        : undefined;
+    const lastAttemptedPostAt =
+      typeof parsed.last_attempted_post_at === "string" &&
+      Number.isFinite(Date.parse(parsed.last_attempted_post_at))
+        ? parsed.last_attempted_post_at
+        : undefined;
+    const postedListingIdsRaw =
+      parsed.posted_listing_ids && typeof parsed.posted_listing_ids === "object"
+        ? parsed.posted_listing_ids
+        : null;
+    const postedListingIds =
+      postedListingIdsRaw && !Array.isArray(postedListingIdsRaw)
+        ? Object.fromEntries(
+            Object.entries(postedListingIdsRaw as Record<string, unknown>)
+              .map(([key, value]) => [key, typeof value === "string" ? value.trim() : ""])
+              .filter((entry): entry is [string, string] => Boolean(entry[0] && entry[1]))
+              .map(([key, value]) =>
+                Number.isFinite(Date.parse(value)) ? ([key, value] as const) : ([key, ""] as const),
+              )
+              .filter((entry) => Boolean(entry[1])),
+          )
+        : undefined;
     return {
       seenIds: seenIds.slice(0, MAX_SEEN_IDS),
       igFailedIds: igFailedIds.slice(0, MAX_SEEN_IDS),
@@ -463,6 +624,13 @@ async function loadState(): Promise<WatcherState> {
       ...(lastPostedId ? { last_posted_id: lastPostedId } : {}),
       ...(postedAtById && Object.keys(postedAtById).length > 0
         ? { posted_at_by_id: postedAtById }
+        : {}),
+      ...(lastSuccessfulPostAt ? { last_successful_post_at: lastSuccessfulPostAt } : {}),
+      ...(lastSuccessfulFbPostAt ? { last_successful_fb_post_at: lastSuccessfulFbPostAt } : {}),
+      ...(lastSuccessfulIgPostAt ? { last_successful_ig_post_at: lastSuccessfulIgPostAt } : {}),
+      ...(lastAttemptedPostAt ? { last_attempted_post_at: lastAttemptedPostAt } : {}),
+      ...(postedListingIds && Object.keys(postedListingIds).length > 0
+        ? { posted_listing_ids: postedListingIds }
         : {}),
     };
   } catch {
@@ -492,6 +660,22 @@ async function saveState(state: WatcherState): Promise<void> {
         )
       : undefined;
 
+  const postedListingIdEntries = Object.entries(state.posted_listing_ids ?? {})
+    .map(([key, value]) => [key.trim(), value.trim()] as const)
+    .filter((entry): entry is [string, string] => Boolean(entry[0] && entry[1]))
+    .map(([key, value]) => [key, value, Date.parse(value)] as const)
+    .filter((entry): entry is [string, string, number] => Number.isFinite(entry[2]));
+
+  postedListingIdEntries.sort((a, b) => b[2] - a[2]);
+  const normalizedPostedListingIds =
+    postedListingIdEntries.length > 0
+      ? Object.fromEntries(
+          postedListingIdEntries
+            .slice(0, MAX_SEEN_IDS)
+            .map(([key, value]) => [key, new Date(Date.parse(value)).toISOString()] as const),
+        )
+      : undefined;
+
   const normalizedLastRotationAt =
     typeof state.last_rotation_at === "string" &&
     Number.isFinite(Date.parse(state.last_rotation_at))
@@ -500,6 +684,26 @@ async function saveState(state: WatcherState): Promise<void> {
   const normalizedLastPostedId =
     typeof state.last_posted_id === "string" && state.last_posted_id.trim()
       ? state.last_posted_id.trim()
+      : undefined;
+  const normalizedLastSuccessfulPostAt =
+    typeof state.last_successful_post_at === "string" &&
+    Number.isFinite(Date.parse(state.last_successful_post_at))
+      ? new Date(Date.parse(state.last_successful_post_at)).toISOString()
+      : undefined;
+  const normalizedLastSuccessfulFbPostAt =
+    typeof state.last_successful_fb_post_at === "string" &&
+    Number.isFinite(Date.parse(state.last_successful_fb_post_at))
+      ? new Date(Date.parse(state.last_successful_fb_post_at)).toISOString()
+      : undefined;
+  const normalizedLastSuccessfulIgPostAt =
+    typeof state.last_successful_ig_post_at === "string" &&
+    Number.isFinite(Date.parse(state.last_successful_ig_post_at))
+      ? new Date(Date.parse(state.last_successful_ig_post_at)).toISOString()
+      : undefined;
+  const normalizedLastAttemptedPostAt =
+    typeof state.last_attempted_post_at === "string" &&
+    Number.isFinite(Date.parse(state.last_attempted_post_at))
+      ? new Date(Date.parse(state.last_attempted_post_at)).toISOString()
       : undefined;
 
   await mkdir(dirname(STATE_PATH), { recursive: true });
@@ -511,6 +715,19 @@ async function saveState(state: WatcherState): Promise<void> {
         ...(normalizedLastRotationAt ? { last_rotation_at: normalizedLastRotationAt } : {}),
         ...(normalizedLastPostedId ? { last_posted_id: normalizedLastPostedId } : {}),
         ...(normalizedPostedAtById ? { posted_at_by_id: normalizedPostedAtById } : {}),
+        ...(normalizedLastSuccessfulPostAt
+          ? { last_successful_post_at: normalizedLastSuccessfulPostAt }
+          : {}),
+        ...(normalizedLastSuccessfulFbPostAt
+          ? { last_successful_fb_post_at: normalizedLastSuccessfulFbPostAt }
+          : {}),
+        ...(normalizedLastSuccessfulIgPostAt
+          ? { last_successful_ig_post_at: normalizedLastSuccessfulIgPostAt }
+          : {}),
+        ...(normalizedLastAttemptedPostAt
+          ? { last_attempted_post_at: normalizedLastAttemptedPostAt }
+          : {}),
+        ...(normalizedPostedListingIds ? { posted_listing_ids: normalizedPostedListingIds } : {}),
         seenIds: state.seenIds.slice(0, MAX_SEEN_IDS),
         igFailedIds: state.igFailedIds?.slice(0, MAX_SEEN_IDS) ?? [],
       },
@@ -640,6 +857,68 @@ function parseIsoTimestampMs(raw: string | undefined): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+export function extractListingId(raw: string | null | undefined): string | null {
+  if (!raw) {
+    return null;
+  }
+  const input = raw.trim();
+  if (!input) {
+    return null;
+  }
+
+  const match = /\/listing\/(\d+)/i.exec(input);
+  return match?.[1] ?? null;
+}
+
+export function extractRssImageUrl(descriptionHtml: string | null | undefined): string | null {
+  return extractEtsyRssImageUrl({ description: descriptionHtml ?? "" });
+}
+
+export function shouldPostNow(
+  state: WatcherState,
+  nowMs: number,
+  config?: { maxPostsPerDay?: number; minPostIntervalMs?: number },
+): { ok: boolean; reason?: string } {
+  const maxPerDay = Math.max(1, config?.maxPostsPerDay ?? MAX_POSTS_PER_DAY);
+  const minIntervalMs = Math.max(0, config?.minPostIntervalMs ?? MIN_POST_INTERVAL_MS);
+  const lastSuccessMs = parseIsoTimestampMs(state.last_successful_post_at);
+  const lastAttemptMs = parseIsoTimestampMs(state.last_attempted_post_at);
+  const postsInWindow = Object.values(state.posted_listing_ids ?? {}).filter((iso) => {
+    const parsed = parseIsoTimestampMs(iso);
+    return parsed != null && nowMs - parsed < 24 * 60 * 60 * 1000;
+  }).length;
+
+  if (postsInWindow >= maxPerDay) {
+    return { ok: false, reason: "daily_limit" };
+  }
+
+  const latestAttemptMs =
+    lastSuccessMs != null && lastAttemptMs != null
+      ? Math.max(lastSuccessMs, lastAttemptMs)
+      : (lastSuccessMs ?? lastAttemptMs);
+
+  if (latestAttemptMs != null && nowMs - latestAttemptMs < minIntervalMs) {
+    return { ok: false, reason: "min_interval" };
+  }
+
+  return { ok: true };
+}
+
+export function isDuplicate(
+  listingId: string,
+  state: WatcherState,
+  nowMs: number,
+  config?: { dedupeWindowMs?: number },
+): boolean {
+  const dedupeWindowMs = Math.max(0, config?.dedupeWindowMs ?? DEDUPE_WINDOW_MS);
+  const postedIso = state.posted_listing_ids?.[listingId];
+  const postedMs = postedIso ? parseIsoTimestampMs(postedIso) : null;
+  if (postedMs == null) {
+    return false;
+  }
+  return nowMs - postedMs < dedupeWindowMs;
+}
+
 async function runMetaHealthcheck(): Promise<MetaHealthcheckStatus> {
   const missingPermissions = new Set<string>(META_REQUIRED_PERMISSIONS);
   const errors: string[] = [];
@@ -763,161 +1042,80 @@ async function sendTelegramText(text: string): Promise<boolean> {
   return true;
 }
 
-async function postFacebookItem(item: FeedItem): Promise<void> {
+async function postFacebookItem(params: {
+  candidate: ListingCandidate;
+  caption: CaptionBuildResult;
+  image: ResolvedImage;
+}): Promise<PublishResult> {
   if (!facebookEnabled()) {
-    return;
+    return { attempted: false, ok: false, skippedReason: "facebook_disabled" };
   }
 
-  let canonicalListingUrlForLog: string | null = null;
-  let listingUrlLocaleForLog: string | null = null;
-  let imageHostForLog: string | null = null;
-  let imageSourceForLog: string | null = null;
-  let captionSourceForLog: string | null = null;
-  let langDetectedForLog: string | null = null;
-  let translationAppliedForLog: boolean | null = null;
-  let publishMethodForLog: string | null = null;
+  const pageToken = await resolveMetaPageTokenOnce();
+  const caption = params.caption.captionText
+    ? `${params.caption.captionText}\n${params.candidate.canonicalListingUrl}`
+    : params.candidate.canonicalListingUrl;
+
+  const logBase = {
+    listingId: params.candidate.listingId,
+    canonicalListingUrl: params.candidate.canonicalListingUrl,
+    imageHost: params.image.imageHost,
+    imageSource: params.image.imageSource,
+    captionSource: params.caption.captionSource,
+    langDetected: params.caption.langDetected,
+    translationApplied: params.caption.translationApplied,
+  };
+
+  logMeta("facebook_publish_attempt", {
+    ...logBase,
+    pageId: META_PAGE_ID,
+    tokenSource: pageToken.source,
+    tokenFingerprint: pageToken.fingerprint,
+  });
 
   try {
-    const rawListingUrlOrFeedItemId = item.link.trim() ? item.link : item.id;
-    const canonicalListingUrl = canonicalizeEtsyUrl(rawListingUrlOrFeedItemId);
-    canonicalListingUrlForLog = canonicalListingUrl;
-
-    const pageToken = await resolveMetaPageTokenOnce();
-    const listingUrlLocale =
-      extractEtsyListingLocaleFromUrl(item.link) ?? extractEtsyListingLocaleFromUrl(item.id);
-    listingUrlLocaleForLog = listingUrlLocale;
-
-    const title = item.title.trim();
-    const descriptionText = stripHtmlToText(item.description);
-    const descriptionSnippet = truncateText(descriptionText, 240);
-
-    const captionCandidate =
-      title && descriptionSnippet
-        ? `${title}\n\n${descriptionSnippet}`
-        : title
-          ? title
-          : descriptionSnippet;
-
-    const captionSource = title
-      ? descriptionSnippet
-        ? "rss_title_description"
-        : "rss_title"
-      : descriptionSnippet
-        ? "rss_description"
-        : "fallback_generic_en";
-
-    let finalCaption =
-      stripUrlsFromText(captionCandidate) || "New vintage item is live in the shop.";
-    captionSourceForLog = captionSource;
-
-    let langDetected = detectCaptionLanguage(finalCaption);
-    if (langDetected === "en" && listingUrlLocale === "nl") {
-      langDetected = "nl";
-    }
-    langDetectedForLog = langDetected;
-
-    let translationApplied = false;
-    if (langDetected !== "en") {
-      const translated = await translateTextToEnglish({ text: finalCaption });
-      if (translated) {
-        finalCaption = translated;
-        translationApplied = true;
-      } else {
-        finalCaption = "New vintage item is live in the shop.";
-      }
-    }
-
-    finalCaption = stripUrlsFromText(finalCaption) || "New vintage item is live in the shop.";
-    translationAppliedForLog = translationApplied;
-
-    const imageUrl = extractRssImgSrc(item.description);
-    imageSourceForLog = imageUrl ? "rss_description_img" : "missing";
-    imageHostForLog = urlHostOrNull(imageUrl);
-    publishMethodForLog = imageUrl ? "photos" : "feed";
-
-    logMeta("facebook_publish_attempt", {
-      feedItemId: item.id,
+    const result = await postFacebookPagePhoto({
       pageId: META_PAGE_ID,
-      tokenSource: pageToken.source,
-      tokenFingerprint: pageToken.fingerprint,
-      listingUrl: canonicalListingUrl,
-      postedUrl: canonicalListingUrl,
-      urlLocale: listingUrlLocale,
-      imageHost: imageHostForLog,
-      imageSource: imageSourceForLog,
-      publishMethod: publishMethodForLog,
-      captionSource,
-      langDetected,
-      translationApplied,
-      captionPreview: finalCaption.slice(0, 120),
+      accessToken: pageToken.token,
+      imageUrl: params.image.imageUrl,
+      caption,
     });
 
-    if (imageUrl) {
-      const result = await postFacebookPagePhoto({
-        pageId: META_PAGE_ID,
-        accessToken: pageToken.token,
-        imageUrl,
-        caption: `${finalCaption}\n${canonicalListingUrl}`,
-      });
-
-      const id = result.postId ?? result.photoId;
-      console.log(
-        `[rss] Facebook photo created: id=${id} photo_id=${result.photoId} post_id=${result.postId ?? "<none>"}`,
-      );
-      logMeta("facebook_publish_ok", {
-        pageId: META_PAGE_ID,
-        publishMethod: "photos",
-        id,
-        photoId: result.photoId,
-        postId: result.postId,
-        listingUrl: canonicalListingUrl,
-        postedUrl: canonicalListingUrl,
-      });
-    } else {
-      const result = await postFacebookPageEtsyListing({
-        pageId: META_PAGE_ID,
-        accessToken: pageToken.token,
-        message: finalCaption,
-        etsyListingUrl: canonicalListingUrl,
-        verifyAttachment: RSS_FACEBOOK_VERIFY_ATTACHMENT,
-        verifyRetryDelayMs: RSS_FACEBOOK_VERIFY_DELAY_MS ?? 15_000,
-      });
-
-      const attachmentStatus =
-        result.attachmentVerification?.hasAttachment === true
-          ? "attachment=ok"
-          : result.attachmentVerification?.hasAttachment === false
-            ? "attachment=missing"
-            : result.attachmentVerification?.hasAttachment === null
-              ? "attachment=unknown"
-              : "attachment=unchecked";
-
-      console.log(`[rss] Facebook post created: id=${result.postId} ${attachmentStatus}`);
-      logMeta("facebook_publish_ok", {
-        pageId: META_PAGE_ID,
-        publishMethod: "feed",
-        postId: result.postId,
-        attachmentStatus,
-        listingUrl: canonicalListingUrl,
-        postedUrl: canonicalListingUrl,
-      });
+    const id = result.postId ?? result.photoId ?? null;
+    if (!id) {
+      throw new Error("FACEBOOK_POST_ID_MISSING");
     }
+
+    logMeta("facebook_publish_ok", {
+      ...logBase,
+      pageId: META_PAGE_ID,
+      publishMethod: "photos",
+      id,
+      photoId: result.photoId,
+      postId: result.postId,
+    });
+
+    return {
+      attempted: true,
+      ok: true,
+      photoId: result.photoId ?? null,
+      postId: result.postId ?? null,
+    };
   } catch (error) {
-    console.log(`[rss] Facebook post failed: ${String(error)}`);
+    const status =
+      error instanceof MetaGraphRequestError
+        ? error.status
+        : ((error as { status?: number | undefined })?.status ?? null);
+    const fbtraceId =
+      error instanceof MetaGraphRequestError ? (error.error?.fbtraceId ?? null) : null;
     logMeta("facebook_publish_failed", {
-      feedItemId: item.id,
+      ...logBase,
       pageId: META_PAGE_ID,
-      listingUrl: canonicalListingUrlForLog,
-      postedUrl: canonicalListingUrlForLog,
-      urlLocale: listingUrlLocaleForLog,
-      imageHost: imageHostForLog,
-      imageSource: imageSourceForLog,
-      captionSource: captionSourceForLog,
-      langDetected: langDetectedForLog,
-      translationApplied: translationAppliedForLog,
-      publishMethod: publishMethodForLog,
       error: String(error),
+      status,
+      fbtrace_id: fbtraceId,
     });
+    return { attempted: true, ok: false, error, status, fbtraceId };
   }
 }
 
@@ -1081,195 +1279,135 @@ async function resolveEtsyListingImageUrl(listingUrlNormalized: string): Promise
   return { listingUrlNormalized, imageUrl: extracted.url, imageSource: extracted.source };
 }
 
-async function postInstagramItem(
-  item: FeedItem,
-): Promise<{ ok: boolean; igId: string | null; attempted: boolean }> {
+async function postInstagramItem(params: {
+  candidate: ListingCandidate;
+  caption: CaptionBuildResult;
+  image: ResolvedImage | null;
+}): Promise<PublishResult & { igId: string | null }> {
   if (!instagramEnabled()) {
-    console.log("[rss] instagram disabled; skipping");
-    return { ok: true, igId: null, attempted: false };
+    return { ok: true, attempted: false, igId: null, skippedReason: "instagram_disabled" };
   }
 
-  console.log("[rss] instagram enabled; attempting publish");
+  await logMetaTokenPermissionsOnce();
 
-  let igId: string | null = null;
-  let canonicalListingUrlForLog: string | null = null;
-  let listingUrlLocaleForLog: string | null = null;
-  let imageHostForLog: string | null = null;
-  let imageSourceForLog: string | null = null;
-  let tokenSourceForLog: string | null = null;
-  let tokenFingerprintForLog: string | null = null;
-  let captionSourceForLog: string | null = null;
-  let langDetectedForLog: string | null = null;
-  let translationAppliedForLog: boolean | null = null;
-  try {
-    await logMetaTokenPermissionsOnce();
-
-    const pageToken = await resolveMetaPageTokenOnce();
-    tokenSourceForLog = pageToken.source;
-    tokenFingerprintForLog = pageToken.fingerprint;
-    const instagramBusiness = await resolveInstagramBusinessOnce();
-    igId = instagramBusiness?.id ?? null;
-    if (!instagramBusiness?.id) {
-      logMeta("instagram_not_linked", {
-        pageId: META_PAGE_ID,
-        reason:
-          "instagram_business_account missing (Page not linked to an Instagram business/pro account)",
-      });
-      return { ok: false, igId: null, attempted: true };
-    }
-
-    const rawListingUrlOrFeedItemId = item.link.trim() ? item.link : item.id;
-    const canonicalListingUrl = canonicalizeEtsyUrl(rawListingUrlOrFeedItemId);
-    canonicalListingUrlForLog = canonicalListingUrl;
-
-    const listingUrlLocale =
-      extractEtsyListingLocaleFromUrl(item.link) ?? extractEtsyListingLocaleFromUrl(item.id);
-    listingUrlLocaleForLog = listingUrlLocale;
-
-    const title = item.title.trim();
-    const descriptionText = stripHtmlToText(item.description);
-    const descriptionSnippet = truncateText(descriptionText, 180);
-
-    const captionCandidate =
-      title && descriptionSnippet
-        ? `${title}\n\n${descriptionSnippet}`
-        : title
-          ? title
-          : descriptionSnippet;
-
-    const captionSource = title
-      ? descriptionSnippet
-        ? "rss_title_description"
-        : "rss_title"
-      : descriptionSnippet
-        ? "rss_description"
-        : "fallback_generic_en";
-
-    captionSourceForLog = captionSource;
-
-    let captionText =
-      stripUrlsFromText(captionCandidate) || "New vintage item is live in the shop.";
-
-    let langDetected = detectCaptionLanguage(captionText);
-    if (langDetected === "en" && listingUrlLocale === "nl") {
-      langDetected = "nl";
-    }
-    langDetectedForLog = langDetected;
-
-    let translationApplied = false;
-    if (langDetected !== "en") {
-      const translated = await translateTextToEnglish({ text: captionText });
-      if (translated) {
-        captionText = translated;
-        translationApplied = true;
-      } else {
-        captionText = "New vintage item is live in the shop.";
-      }
-    }
-
-    captionText = stripUrlsFromText(captionText) || "New vintage item is live in the shop.";
-    const captionForPost = captionText
-      ? `${captionText}\n${canonicalListingUrl}`
-      : canonicalListingUrl;
-    translationAppliedForLog = translationApplied;
-
-    let imageUrl: string;
-    if (RSS_INSTAGRAM_IMAGE_URL_OVERRIDE) {
-      imageUrl = RSS_INSTAGRAM_IMAGE_URL_OVERRIDE;
-      imageSourceForLog = "override";
-    } else {
-      const extracted = extractEtsyRssImageUrl(item);
-      if (extracted) {
-        imageUrl = extracted;
-        imageSourceForLog = "rss_description_img";
-      } else {
-        const resolved = await resolveEtsyListingImageUrl(canonicalListingUrl);
-        canonicalListingUrlForLog = resolved.listingUrlNormalized;
-        imageUrl = resolved.imageUrl;
-        imageSourceForLog = resolved.imageSource;
-      }
-    }
-
-    imageHostForLog = urlHostOrNull(imageUrl);
-
-    logMeta("instagram_publish_attempt", {
-      feedItemId: item.id,
+  const pageToken = await resolveMetaPageTokenOnce();
+  const instagramBusiness = await resolveInstagramBusinessOnce();
+  const igId = instagramBusiness?.id ?? null;
+  if (!instagramBusiness?.id) {
+    logMeta("instagram_not_linked", {
       pageId: META_PAGE_ID,
-      igId: instagramBusiness.id,
-      tokenSource: pageToken.source,
-      tokenFingerprint: pageToken.fingerprint,
-      listingUrl: canonicalListingUrl,
-      postedUrl: canonicalListingUrl,
-      urlLocale: listingUrlLocale,
-      imageHost: imageHostForLog,
-      imageSource: imageSourceForLog,
-      captionSource,
-      langDetected,
-      translationApplied,
-      captionPreview: captionText.slice(0, 120),
+      reason:
+        "instagram_business_account missing (Page not linked to an Instagram business/pro account)",
     });
+    return { ok: false, attempted: true, igId, skippedReason: "ig_not_linked" };
+  }
 
+  let imageToUse = params.image;
+  let imageSourceForLog = imageToUse?.imageSource ?? null;
+  if (RSS_INSTAGRAM_IMAGE_URL_OVERRIDE) {
+    imageToUse = {
+      imageUrl: RSS_INSTAGRAM_IMAGE_URL_OVERRIDE,
+      imageSource: "override",
+      imageHost: urlHostOrNull(RSS_INSTAGRAM_IMAGE_URL_OVERRIDE),
+    };
+    imageSourceForLog = "override";
+  }
+
+  if (!imageToUse) {
+    logMeta("instagram_publish_skipped", {
+      listingId: params.candidate.listingId,
+      canonicalListingUrl: params.candidate.canonicalListingUrl,
+      reason: "image_missing",
+    });
+    return { ok: false, attempted: false, igId, skippedReason: "image_missing" };
+  }
+
+  const captionForPost = params.caption.captionText
+    ? `${params.caption.captionText}\n${params.candidate.canonicalListingUrl}`
+    : params.candidate.canonicalListingUrl;
+
+  logMeta("instagram_publish_attempt", {
+    listingId: params.candidate.listingId,
+    canonicalListingUrl: params.candidate.canonicalListingUrl,
+    pageId: META_PAGE_ID,
+    igId,
+    tokenSource: pageToken.source,
+    tokenFingerprint: pageToken.fingerprint,
+    imageHost: imageToUse.imageHost,
+    imageSource: imageSourceForLog,
+    captionSource: params.caption.captionSource,
+    langDetected: params.caption.langDetected,
+    translationApplied: params.caption.translationApplied,
+    captionPreview: params.caption.captionText.slice(0, 120),
+  });
+
+  try {
     const result = await publishInstagramPhoto({
       igUserId: instagramBusiness.id,
       accessToken: pageToken.token,
-      imageUrl,
+      imageUrl: imageToUse.imageUrl,
       caption: captionForPost,
       pollIntervalMs: RSS_INSTAGRAM_POLL_INTERVAL_MS ?? 2_000,
       pollTimeoutMs: RSS_INSTAGRAM_POLL_TIMEOUT_MS ?? 60_000,
     });
 
-    if (result.creationId && result.mediaId) {
-      logMeta("instagram_publish_ok", {
-        pageId: META_PAGE_ID,
-        igId: result.igUserId,
-        creationId: result.creationId,
-        mediaId: result.mediaId,
-        listingUrl: canonicalListingUrl,
-        postedUrl: canonicalListingUrl,
-      });
-    }
+    logMeta("instagram_publish_ok", {
+      listingId: params.candidate.listingId,
+      canonicalListingUrl: params.candidate.canonicalListingUrl,
+      pageId: META_PAGE_ID,
+      igId: result.igUserId,
+      creationId: result.creationId,
+      mediaId: result.mediaId,
+    });
 
-    return { ok: true, igId: instagramBusiness.id, attempted: true };
+    return {
+      attempted: true,
+      ok: true,
+      igId,
+      creationId: result.creationId,
+      publishId: result.mediaId,
+    };
   } catch (error) {
     if (error instanceof MetaGraphRequestError) {
       logMeta("instagram_publish_failed", {
-        feedItemId: item.id,
-        listingUrl: canonicalListingUrlForLog,
-        postedUrl: canonicalListingUrlForLog,
+        listingId: params.candidate.listingId,
+        canonicalListingUrl: params.candidate.canonicalListingUrl,
         pageId: META_PAGE_ID,
         igId,
-        tokenSource: tokenSourceForLog,
-        tokenFingerprint: tokenFingerprintForLog,
-        urlLocale: listingUrlLocaleForLog,
-        imageHost: imageHostForLog,
+        tokenSource: pageToken.source,
+        tokenFingerprint: pageToken.fingerprint,
+        imageHost: imageToUse.imageHost,
         imageSource: imageSourceForLog,
-        captionSource: captionSourceForLog,
-        langDetected: langDetectedForLog,
-        translationApplied: translationAppliedForLog,
+        captionSource: params.caption.captionSource,
+        langDetected: params.caption.langDetected,
+        translationApplied: params.caption.translationApplied,
         request: { method: error.method, url: error.url },
         status: error.status,
         error: error.error,
       });
-      return { ok: false, igId, attempted: true };
+      return {
+        attempted: true,
+        ok: false,
+        igId,
+        status: error.status,
+        fbtraceId: error.error?.fbtraceId ?? null,
+        error,
+      };
     }
 
     logMeta("instagram_publish_failed", {
-      feedItemId: item.id,
-      listingUrl: canonicalListingUrlForLog,
-      postedUrl: canonicalListingUrlForLog,
+      listingId: params.candidate.listingId,
+      canonicalListingUrl: params.candidate.canonicalListingUrl,
       pageId: META_PAGE_ID,
       igId,
-      tokenSource: tokenSourceForLog,
-      tokenFingerprint: tokenFingerprintForLog,
-      urlLocale: listingUrlLocaleForLog,
-      imageHost: imageHostForLog,
+      imageHost: imageToUse.imageHost,
       imageSource: imageSourceForLog,
-      captionSource: captionSourceForLog,
-      langDetected: langDetectedForLog,
-      translationApplied: translationAppliedForLog,
+      captionSource: params.caption.captionSource,
+      langDetected: params.caption.langDetected,
+      translationApplied: params.caption.translationApplied,
       error: String(error),
     });
-    return { ok: false, igId, attempted: true };
+    return { attempted: true, ok: false, igId, error };
   }
 }
 
@@ -1342,17 +1480,6 @@ async function postInstagramTest(): Promise<boolean> {
   }
 }
 
-function formatFeedItemMessage(item: FeedItem): string {
-  const lines = [`[ETSY RSS] ${item.title}`];
-  if (item.link) {
-    lines.push(item.link);
-  }
-  if (item.publishedAt) {
-    lines.push(`Published: ${item.publishedAt}`);
-  }
-  return lines.join("\n");
-}
-
 async function fetchFeed(url: string): Promise<FeedItem[]> {
   const response = await fetch(url, {
     headers: {
@@ -1366,52 +1493,6 @@ async function fetchFeed(url: string): Promise<FeedItem[]> {
   return parseFeedItems(xml);
 }
 
-type RotationSelection =
-  | { item: FeedItem; reason: "never_posted" | "stale_30d" | "least_recent"; allowRecent: boolean }
-  | { item: null; reason: "no_candidates" | "no_eligible" };
-
-function selectRotationItem(params: {
-  items: FeedItem[];
-  state: WatcherState;
-  nowMs: number;
-  allowRecent: boolean;
-}): RotationSelection {
-  const lastPostedId = params.state.last_posted_id?.trim() ?? "";
-  const postedAtById = params.state.posted_at_by_id ?? {};
-  const candidates = params.items.filter(
-    (item) => item.link && item.id && item.id !== lastPostedId,
-  );
-  if (candidates.length === 0) {
-    return { item: null, reason: "no_candidates" };
-  }
-
-  const neverPosted = candidates.filter((item) => !postedAtById[item.id]);
-  if (neverPosted.length > 0) {
-    return { item: neverPosted[0], reason: "never_posted", allowRecent: params.allowRecent };
-  }
-
-  const posted = candidates
-    .map((item) => {
-      const postedAt = postedAtById[item.id];
-      const postedAtMs = parseIsoTimestampMs(postedAt);
-      return postedAtMs == null ? null : { item, postedAtMs };
-    })
-    .filter((entry): entry is { item: FeedItem; postedAtMs: number } => Boolean(entry));
-
-  const stale = posted.filter((entry) => params.nowMs - entry.postedAtMs >= THIRTY_DAYS_MS);
-  if (stale.length > 0) {
-    stale.sort((a, b) => a.postedAtMs - b.postedAtMs);
-    return { item: stale[0].item, reason: "stale_30d", allowRecent: params.allowRecent };
-  }
-
-  if (params.allowRecent && posted.length > 0) {
-    posted.sort((a, b) => a.postedAtMs - b.postedAtMs);
-    return { item: posted[0].item, reason: "least_recent", allowRecent: params.allowRecent };
-  }
-
-  return { item: null, reason: "no_eligible" };
-}
-
 function recordPostedItem(
   state: WatcherState,
   params: { itemId: string; postedAtIso: string },
@@ -1421,41 +1502,6 @@ function recordPostedItem(
     state.posted_at_by_id = {};
   }
   state.posted_at_by_id[params.itemId] = params.postedAtIso;
-}
-
-async function retryInstagramPublishFailures(params: {
-  items: FeedItem[];
-  failedIdsSnapshot: string[];
-}): Promise<void> {
-  if (!instagramEnabled()) {
-    return;
-  }
-
-  const failedIds = params.failedIdsSnapshot
-    .map((entry) => entry.trim())
-    .filter((entry) => Boolean(entry));
-  if (failedIds.length === 0) {
-    return;
-  }
-
-  const activeFailedSet = new Set(currentState.igFailedIds ?? []);
-  const retryId = failedIds.find((id) => activeFailedSet.has(id));
-  if (!retryId) {
-    return;
-  }
-
-  const item = params.items.find((candidate) => candidate.id === retryId);
-  if (!item) {
-    return;
-  }
-
-  const result = await postInstagramItem(item);
-  if (!result.attempted || !result.ok) {
-    return;
-  }
-
-  currentState.igFailedIds = (currentState.igFailedIds ?? []).filter((entry) => entry !== retryId);
-  await saveState(currentState);
 }
 
 async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<void> {
@@ -1475,156 +1521,137 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
       return;
     }
 
-    const igFailedIdsSnapshot = [...(currentState.igFailedIds ?? [])];
-    const known = new Set(currentState.seenIds);
-    const newItems = items.filter((item) => !known.has(item.id));
-
     if (!currentState.initialized) {
       currentState.initialized = true;
-      currentState.seenIds = items.map((item) => item.id).slice(0, MAX_SEEN_IDS);
-      await saveState(currentState);
-      console.log(`[rss] Initialized state with ${currentState.seenIds.length} items.`);
-      if (trigger === "manual" && alertsEnabled()) {
-        await sendTelegramText(`RSS run complete: 0 new items (initialized baseline).`);
-      }
-      return;
+      currentState.seenIds = [];
     }
 
-    if (newItems.length === 0) {
-      console.log(`[rss] ${trigger}: no new items.`);
-
-      await retryInstagramPublishFailures({ items, failedIdsSnapshot: igFailedIdsSnapshot });
-
-      const nowMs = Date.now();
-      const cooldownHours = Number.isFinite(ROTATION_COOLDOWN_HOURS)
-        ? Math.max(0, ROTATION_COOLDOWN_HOURS)
-        : 24;
-      const cooldownMs = cooldownHours * 60 * 60 * 1000;
-      const lastRotationMs = parseIsoTimestampMs(currentState.last_rotation_at);
-      const cooldownOk = lastRotationMs == null || nowMs - lastRotationMs >= cooldownMs;
-      const forceThisRun = FORCE_ROTATION_POST && !forceRotationConsumed;
-      const rotationAllowed = forceThisRun || (ROTATION_ENABLED && cooldownOk);
-
-      if (!rotationAllowed) {
-        if (!ROTATION_ENABLED && !forceThisRun) {
-          console.log("[rss] No new items; rotation skipped (disabled).");
-        } else if (!cooldownOk && !forceThisRun) {
-          console.log("[rss] No new items; rotation skipped (cooldown).");
-        } else {
-          console.log("[rss] No new items; rotation skipped.");
-        }
-
-        if (trigger === "manual" && alertsEnabled()) {
-          await sendTelegramText("RSS run complete: no new items.");
-        }
-        return;
-      }
-
-      if (!facebookEnabled() && !instagramEnabled()) {
-        console.log("[rss] No new items; rotation skipped (no channels enabled).");
-        if (trigger === "manual" && alertsEnabled()) {
-          await sendTelegramText("RSS run complete: no new items.");
-        }
-        return;
-      }
-
-      if (forceThisRun) {
-        forceRotationConsumed = true;
-        console.log("[rss] MODE=FORCE_ROTATION_POST");
-      }
-
-      const selection = selectRotationItem({
-        items,
-        state: currentState,
-        nowMs,
-        allowRecent: forceThisRun,
+    const nowMs = Date.now();
+    const gate = shouldPostNow(currentState, nowMs);
+    if (!gate.ok) {
+      logMeta("skipped_due_to_daily_limit", {
+        reason: gate.reason,
+        last_successful_post_at: currentState.last_successful_post_at ?? null,
       });
-
-      if (!selection.item) {
-        console.log(`[rss] No new items; rotation skipped (${selection.reason}).`);
-        if (trigger === "manual" && alertsEnabled()) {
-          await sendTelegramText("RSS run complete: no new items.");
-        }
-        return;
-      }
-
-      console.log(
-        `[rss] Rotation selected: id=${selection.item.id} reason=${selection.reason} allow_recent=${selection.allowRecent ? "yes" : "no"}`,
-      );
-
-      await postFacebookItem(selection.item);
-      const igResult = await postInstagramItem(selection.item);
-      if (igResult.attempted && !igResult.ok) {
-        currentState.igFailedIds = [
-          selection.item.id,
-          ...(currentState.igFailedIds ?? []).filter((entry) => entry !== selection.item.id),
-        ].slice(0, MAX_SEEN_IDS);
-      } else if (igResult.attempted) {
-        currentState.igFailedIds = (currentState.igFailedIds ?? []).filter(
-          (entry) => entry !== selection.item.id,
-        );
-      }
-
-      const postedAtIso = new Date().toISOString();
-      recordPostedItem(currentState, { itemId: selection.item.id, postedAtIso });
-      currentState.last_rotation_at = postedAtIso;
-      await saveState(currentState);
-      console.log(`[rss] Rotation post complete: id=${selection.item.id}`);
-
-      if (trigger === "manual" && alertsEnabled()) {
-        await sendTelegramText(`RSS run complete: rotation post delivered (no new items).`);
-      }
       return;
     }
 
-    const sortedNew = [...newItems].toSorted(
-      (a, b) => (a.publishedAtMs ?? 0) - (b.publishedAtMs ?? 0),
-    );
-    if (alertsEnabled()) {
-      for (const item of sortedNew) {
-        await sendTelegramText(formatFeedItemMessage(item));
-        await postFacebookItem(item);
-        const igResult = await postInstagramItem(item);
-        if (igResult.attempted && !igResult.ok) {
-          currentState.igFailedIds = [
-            item.id,
-            ...(currentState.igFailedIds ?? []).filter((entry) => entry !== item.id),
-          ].slice(0, MAX_SEEN_IDS);
-        } else if (igResult.attempted) {
-          currentState.igFailedIds = (currentState.igFailedIds ?? []).filter(
-            (entry) => entry !== item.id,
-          );
-        }
-        recordPostedItem(currentState, { itemId: item.id, postedAtIso: new Date().toISOString() });
+    const candidates = items
+      .map(toListingCandidate)
+      .filter((entry): entry is ListingCandidate => Boolean(entry));
+
+    const uniqueCandidates: ListingCandidate[] = [];
+    const seenListingIds = new Set<string>();
+    for (const candidate of candidates) {
+      if (seenListingIds.has(candidate.listingId)) {
+        continue;
       }
-      if (trigger === "manual") {
-        await sendTelegramText(`RSS run complete: ${sortedNew.length} new item(s).`);
-      }
-    } else {
-      console.log(`[rss] ${trigger}: ${sortedNew.length} new item(s), alerts disabled.`);
-      for (const item of sortedNew) {
-        await postFacebookItem(item);
-        const igResult = await postInstagramItem(item);
-        if (igResult.attempted && !igResult.ok) {
-          currentState.igFailedIds = [
-            item.id,
-            ...(currentState.igFailedIds ?? []).filter((entry) => entry !== item.id),
-          ].slice(0, MAX_SEEN_IDS);
-        } else if (igResult.attempted) {
-          currentState.igFailedIds = (currentState.igFailedIds ?? []).filter(
-            (entry) => entry !== item.id,
-          );
-        }
-        recordPostedItem(currentState, { itemId: item.id, postedAtIso: new Date().toISOString() });
-      }
+      seenListingIds.add(candidate.listingId);
+      uniqueCandidates.push(candidate);
     }
 
-    await retryInstagramPublishFailures({ items, failedIdsSnapshot: igFailedIdsSnapshot });
+    const eligible = uniqueCandidates.filter(
+      (candidate) => !isDuplicate(candidate.listingId, currentState, nowMs),
+    );
 
-    const merged = [...sortedNew.map((item) => item.id), ...currentState.seenIds];
-    currentState.seenIds = Array.from(new Set(merged)).slice(0, MAX_SEEN_IDS);
+    if (eligible.length === 0) {
+      logMeta("no_eligible_items", { reason: "duplicates_or_empty", dedupe_days: DEDUPE_DAYS });
+      return;
+    }
+
+    eligible.sort((a, b) => {
+      const left = a.publishedAtMs ?? 0;
+      const right = b.publishedAtMs ?? 0;
+      if (right !== left) {
+        return right - left;
+      }
+      return a.listingId.localeCompare(b.listingId);
+    });
+
+    const selected = eligible[0];
+    logMeta("candidate_selected", {
+      listingId: selected.listingId,
+      canonicalListingUrl: selected.canonicalListingUrl,
+      publishedAt: selected.publishedAt ?? null,
+    });
+
+    const caption = await buildCaption({
+      item: selected,
+      canonicalListingUrl: selected.canonicalListingUrl,
+    });
+    const image = await resolveImageForItem({
+      item: selected,
+      canonicalListingUrl: selected.canonicalListingUrl,
+    });
+
+    if (!image) {
+      logMeta("publish_skipped", {
+        listingId: selected.listingId,
+        canonicalListingUrl: selected.canonicalListingUrl,
+        reason: "image_missing",
+      });
+      return;
+    }
+
+    const attemptAtIso = new Date(nowMs).toISOString();
+    currentState.last_attempted_post_at = attemptAtIso;
+
+    const fbResult = await postFacebookItem({ candidate: selected, caption, image });
+    const igResult = await postInstagramItem({ candidate: selected, caption, image });
+
+    const fbSuccess =
+      fbResult.ok && fbResult.attempted && Boolean(fbResult.postId || fbResult.photoId);
+    const igSuccess =
+      igResult.ok &&
+      igResult.attempted &&
+      Boolean(igResult.publishId || igResult.creationId || igResult.postId);
+    const anySuccess = fbSuccess || igSuccess;
+
+    if (igResult.attempted && !igResult.ok) {
+      currentState.igFailedIds = [
+        selected.listingId,
+        ...(currentState.igFailedIds ?? []).filter((entry) => entry !== selected.listingId),
+      ].slice(0, MAX_SEEN_IDS);
+    } else if (igResult.attempted) {
+      currentState.igFailedIds = (currentState.igFailedIds ?? []).filter(
+        (entry) => entry !== selected.listingId,
+      );
+    }
+
+    if (anySuccess) {
+      const postedAtIso = new Date(nowMs).toISOString();
+      recordPostedItem(currentState, { itemId: selected.listingId, postedAtIso });
+      currentState.posted_listing_ids = {
+        [selected.listingId]: postedAtIso,
+        ...currentState.posted_listing_ids,
+      };
+      currentState.last_successful_post_at = postedAtIso;
+      if (fbSuccess) {
+        currentState.last_successful_fb_post_at = postedAtIso;
+      }
+      if (igSuccess) {
+        currentState.last_successful_ig_post_at = postedAtIso;
+      }
+      currentState.last_rotation_at = postedAtIso;
+      logMeta("publish_complete", {
+        listingId: selected.listingId,
+        canonicalListingUrl: selected.canonicalListingUrl,
+        fb_success: fbSuccess,
+        ig_success: igSuccess,
+      });
+    } else {
+      logMeta("publish_failed", {
+        listingId: selected.listingId,
+        canonicalListingUrl: selected.canonicalListingUrl,
+        fb_attempted: fbResult.attempted,
+        ig_attempted: igResult.attempted,
+      });
+    }
+
+    currentState.seenIds = Array.from(
+      new Set([selected.id, ...currentState.seenIds].filter(Boolean)),
+    ).slice(0, MAX_SEEN_IDS);
     await saveState(currentState);
-    console.log(`[rss] ${trigger}: delivered ${sortedNew.length} new item(s).`);
   } catch (error) {
     console.log(`[rss] ${trigger} check failed: ${String(error)}`);
     if (trigger === "manual" && alertsEnabled()) {
@@ -1733,7 +1760,7 @@ async function pollTelegramForCommands(): Promise<void> {
 async function main(): Promise<void> {
   console.log(`telegram.polling.enabled=${TELEGRAM_POLLING_ENABLED}`);
   console.log(
-    `[rss] toggles: FACEBOOK_ENABLED=${FACEBOOK_ENABLED} (FACEBOOK_ENABLED=${formatEnvValue(FACEBOOK_ENABLED_TOGGLE.primaryRaw)}, RSS_FACEBOOK_ENABLED=${formatEnvValue(FACEBOOK_ENABLED_TOGGLE.legacyRaw)}), INSTAGRAM_ENABLED=${INSTAGRAM_ENABLED} (INSTAGRAM_ENABLED=${formatEnvValue(INSTAGRAM_ENABLED_TOGGLE.primaryRaw)}, RSS_INSTAGRAM_ENABLED=${formatEnvValue(INSTAGRAM_ENABLED_TOGGLE.legacyRaw)}), ROTATION_ENABLED=${ROTATION_ENABLED} (ROTATION_ENABLED=${formatEnvValue(process.env.ROTATION_ENABLED)})`,
+    `[rss] toggles: FACEBOOK_ENABLED=${FACEBOOK_ENABLED} (FACEBOOK_ENABLED=${formatEnvValue(FACEBOOK_ENABLED_TOGGLE.primaryRaw)}, RSS_FACEBOOK_ENABLED=${formatEnvValue(FACEBOOK_ENABLED_TOGGLE.legacyRaw)}), INSTAGRAM_ENABLED=${INSTAGRAM_ENABLED} (INSTAGRAM_ENABLED=${formatEnvValue(INSTAGRAM_ENABLED_TOGGLE.primaryRaw)}, RSS_INSTAGRAM_ENABLED=${formatEnvValue(INSTAGRAM_ENABLED_TOGGLE.legacyRaw)})`,
   );
   if (!RSS_DISABLE_HEALTH_SERVER) {
     const healthServer = createServer((req, res) => {
@@ -1755,7 +1782,7 @@ async function main(): Promise<void> {
   }
 
   console.log(
-    `RSS watcher boot: ETSY_SHOP_RSS_URL present=${ETSY_SHOP_RSS_URL ? "yes" : "no"}, state_path=${STATE_PATH}, facebook=${FACEBOOK_ENABLED ? "on" : "off"}, instagram=${INSTAGRAM_ENABLED ? "on" : "off"}, rotation=${ROTATION_ENABLED ? "on" : "off"}, rotation_cooldown_hours=${ROTATION_COOLDOWN_HOURS}, force_rotation=${FORCE_ROTATION_POST ? "on" : "off"}`,
+    `RSS watcher boot: ETSY_SHOP_RSS_URL present=${ETSY_SHOP_RSS_URL ? "yes" : "no"}, state_path=${STATE_PATH}, facebook=${FACEBOOK_ENABLED ? "on" : "off"}, instagram=${INSTAGRAM_ENABLED ? "on" : "off"}`,
   );
   currentState = await loadState();
   await saveState(currentState);
@@ -1767,7 +1794,9 @@ async function main(): Promise<void> {
   void pollTelegramForCommands();
 }
 
-void main().catch((error) => {
-  console.error(`[rss] fatal startup error: ${String(error)}`);
-  process.exitCode = 1;
-});
+if (process.env.VITEST_WORKER_ID === undefined) {
+  void main().catch((error) => {
+    console.error(`[rss] fatal startup error: ${String(error)}`);
+    process.exitCode = 1;
+  });
+}
