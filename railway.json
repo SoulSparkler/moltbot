@@ -2,7 +2,7 @@
   "$schema": "https://railway.app/railway.schema.json",
   "build": {
     "builder": "NIXPACKS",
-    "buildCommand": "NODE_ENV=development pnpm install --frozen-lockfile && pnpm --dir apps/etsy-auto-post build",
+    "buildCommand": "NODE_ENV=development pnpm install --frozen-lockfile",
     "env": {
       "NODE_VERSION": "22"
     }
@@ -10,7 +10,7 @@
   "deploy": {
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10,
-    "startCommand": "node apps/etsy-auto-post/dist/index.js",
+    "startCommand": "node_modules/.bin/tsx apps/etsy-auto-post/src/index.ts",
     "healthcheckPath": "/health",
     "healthcheckTimeout": 100,
     "healthcheckInterval": 15
