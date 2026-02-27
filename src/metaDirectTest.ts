@@ -1,4 +1,4 @@
-import { resolveFacebookPageAccessToken } from "../apps/etsy-auto-post/src/lib/meta-instagram.js";
+import { resolveFacebookPageAccessToken } from "../apps/etsy-auto-post/src/lib/meta-instagram.ts";
 
 const META_GRAPH_API_BASE = "https://graph.facebook.com/v18.0";
 
