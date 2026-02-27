@@ -1,8 +1,9 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { dirname } from "node:path";
-import { extractEtsyListingImageUrlFromHtml, extractEtsyRssImageUrl } from "../infra/etsy.js";
-import { canonicalizeEtsyUrl, postFacebookPagePhoto } from "../infra/meta-facebook.js";
+import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
+import { fileURLToPath } from "node:url";
+import { extractEtsyListingImageUrlFromHtml, extractEtsyRssImageUrl } from "./lib/etsy.js";
+import { canonicalizeEtsyUrl, postFacebookPagePhoto } from "./lib/meta-facebook.js";
 import {
   fetchMePermissions,
   type InstagramBusinessAccount,
@@ -11,12 +12,14 @@ import {
   publishInstagramPhoto,
   resolveFacebookPageAccessToken,
   resolveInstagramBusinessAccount,
-} from "../infra/meta-instagram.js";
+} from "./lib/meta-instagram.js";
 
+const SERVICE_NAME = "etsy-auto-post";
 const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
 const TELEGRAM_POLL_TIMEOUT_SECONDS = 25;
 const MAX_SEEN_IDS = 500;
-const STATE_PATH = "/data/.openclaw/state/etsy_rss.json";
+const DEFAULT_STATE_PATH = "/data/.openclaw/state/etsy_rss.json";
+const STATE_PATH = resolveStatePath(process.env.RSS_STATE_PATH, DEFAULT_STATE_PATH);
 const META_REQUIRED_PERMISSIONS = [
   "pages_show_list",
   "pages_read_engagement",
@@ -118,6 +121,150 @@ let currentState: WatcherState = {
 };
 let checkInFlight: Promise<void> | null = null;
 let queuedManualRun = false;
+const STARTED_AT_ISO = new Date().toISOString();
+
+type BuildInfo = {
+  commitSha: string;
+  commitSource: string;
+  buildTime: string;
+  buildTimeSource: string;
+  version: string;
+  startedAt: string;
+  cwd: string;
+};
+
+const COMMIT_ENV_KEYS = [
+  "RAILWAY_GIT_COMMIT_SHA",
+  "RAILWAY_COMMIT_SHA",
+  "GIT_COMMIT_SHA",
+  "GITHUB_SHA",
+  "VERCEL_GIT_COMMIT_SHA",
+  "SOURCE_VERSION",
+  "COMMIT_SHA",
+];
+
+const BUILD_TIME_ENV_KEYS = [
+  "RAILWAY_BUILD_TIME",
+  "RAILWAY_DEPLOY_TIME",
+  "VERCEL_DEPLOYMENT_CREATED_AT",
+  "BUILD_TIME",
+  "BUILD_TIMESTAMP",
+];
+
+let resolvedBuildInfo: BuildInfo | null = null;
+
+function resolveStatePath(overrideRaw: string | undefined, fallback: string): string {
+  const candidate = overrideRaw?.trim() || fallback;
+  return isAbsolute(candidate) ? candidate : resolvePath(process.cwd(), candidate);
+}
+
+function resolveEnvValue(keys: string[]): { value: string | null; source: string | null } {
+  for (const key of keys) {
+    const value = process.env[key];
+    if (value && value.trim()) {
+      return { value: value.trim(), source: key };
+    }
+  }
+  return { value: null, source: null };
+}
+
+function isEnoent(error: unknown): boolean {
+  return Boolean((error as NodeJS.ErrnoException)?.code === "ENOENT");
+}
+
+async function readFileSafe(path: string): Promise<string | null> {
+  try {
+    return await readFile(path, "utf8");
+  } catch (error) {
+    if (isEnoent(error)) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function findGitRoot(): Promise<string | null> {
+  let cursor = fileURLToPath(new URL(".", import.meta.url));
+  for (let depth = 0; depth < 6; depth += 1) {
+    const headPath = join(cursor, ".git", "HEAD");
+    const head = await readFileSafe(headPath);
+    if (head) {
+      return join(cursor, ".git");
+    }
+    const parent = resolvePath(cursor, "..");
+    if (parent === cursor) {
+      break;
+    }
+    cursor = parent;
+  }
+  return null;
+}
+
+async function readGitSha(gitDir: string): Promise<string | null> {
+  const headRaw = await readFileSafe(join(gitDir, "HEAD"));
+  if (!headRaw) {
+    return null;
+  }
+  const head = headRaw.trim();
+  if (head.startsWith("ref:")) {
+    const ref = head.slice("ref:".length).trim();
+    return (await readFileSafe(join(gitDir, ref)))?.trim() ?? null;
+  }
+  return head || null;
+}
+
+async function resolveGitCommit(): Promise<{ sha: string | null; source: string }> {
+  const envCommit = resolveEnvValue(COMMIT_ENV_KEYS);
+  if (envCommit.value) {
+    return { sha: envCommit.value, source: envCommit.source ?? "env" };
+  }
+
+  const gitDir = await findGitRoot();
+  if (!gitDir) {
+    return { sha: null, source: "missing_git" };
+  }
+
+  const sha = await readGitSha(gitDir);
+  return { sha, source: sha ? "git" : "git_missing_ref" };
+}
+
+async function resolvePackageVersion(): Promise<string> {
+  try {
+    const pkgPath = fileURLToPath(new URL("../package.json", import.meta.url));
+    const json = JSON.parse(await readFile(pkgPath, "utf8")) as { version?: string };
+    return json.version?.trim() || "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+async function resolveBuildInfo(): Promise<BuildInfo> {
+  const { sha, source } = await resolveGitCommit();
+  const buildTimeEnv = resolveEnvValue(BUILD_TIME_ENV_KEYS);
+  const buildTime = buildTimeEnv.value ?? STARTED_AT_ISO;
+
+  return {
+    commitSha: sha ?? "unknown",
+    commitSource: source,
+    buildTime,
+    buildTimeSource: buildTimeEnv.source ?? (buildTimeEnv.value ? "env" : "startup"),
+    version: await resolvePackageVersion(),
+    startedAt: STARTED_AT_ISO,
+    cwd: process.cwd(),
+  };
+}
+
+function logBuildProof(info: BuildInfo): void {
+  console.log(
+    `[build] sha=${info.commitSha} source=${info.commitSource} version=${info.version} build_time=${info.buildTime} build_time_source=${info.buildTimeSource} start_time=${info.startedAt} service=${SERVICE_NAME}`,
+  );
+}
+
+function logSelfCheck(info: BuildInfo): void {
+  console.log(
+    `[self-check] service=${SERVICE_NAME} cwd=${info.cwd} state_path=${STATE_PATH} rss_url=${ETSY_SHOP_RSS_URL ? "set" : "missing"} facebook=${FACEBOOK_ENABLED ? "on" : "off"} instagram=${INSTAGRAM_ENABLED ? "on" : "off"} max_per_day=${MAX_POSTS_PER_DAY} min_interval_hours=${MIN_POST_INTERVAL_HOURS} dedupe_days=${DEDUPE_DAYS} check_interval_ms=${CHECK_INTERVAL_MS} telegram_polling=${TELEGRAM_POLLING_ENABLED ? "on" : "off"}`,
+  );
+}
 
 function resolveCheckIntervalMs(raw: string | undefined): number {
   if (!raw) {
@@ -1758,15 +1905,56 @@ async function pollTelegramForCommands(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  const buildInfo = await resolveBuildInfo();
+  resolvedBuildInfo = buildInfo;
+  logBuildProof(buildInfo);
+  logSelfCheck(buildInfo);
   console.log(`telegram.polling.enabled=${TELEGRAM_POLLING_ENABLED}`);
   console.log(
     `[rss] toggles: FACEBOOK_ENABLED=${FACEBOOK_ENABLED} (FACEBOOK_ENABLED=${formatEnvValue(FACEBOOK_ENABLED_TOGGLE.primaryRaw)}, RSS_FACEBOOK_ENABLED=${formatEnvValue(FACEBOOK_ENABLED_TOGGLE.legacyRaw)}), INSTAGRAM_ENABLED=${INSTAGRAM_ENABLED} (INSTAGRAM_ENABLED=${formatEnvValue(INSTAGRAM_ENABLED_TOGGLE.primaryRaw)}, RSS_INSTAGRAM_ENABLED=${formatEnvValue(INSTAGRAM_ENABLED_TOGGLE.legacyRaw)})`,
   );
   if (!RSS_DISABLE_HEALTH_SERVER) {
     const healthServer = createServer((req, res) => {
+      const buildForResponse =
+        resolvedBuildInfo ??
+        ({
+          commitSha: "unknown",
+          commitSource: "unresolved",
+          buildTime: STARTED_AT_ISO,
+          buildTimeSource: "startup",
+          version: "unknown",
+          startedAt: STARTED_AT_ISO,
+          cwd: process.cwd(),
+        } satisfies BuildInfo);
       if (req.url === "/health") {
         res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+      if (req.url === "/self-check") {
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(
+          JSON.stringify({
+            ok: true,
+            service: SERVICE_NAME,
+            build: buildForResponse,
+            config: {
+              cwd: process.cwd(),
+              statePath: STATE_PATH,
+              stateDir: dirname(STATE_PATH),
+              rssUrlPresent: Boolean(ETSY_SHOP_RSS_URL),
+              facebookEnabled: FACEBOOK_ENABLED,
+              instagramEnabled: INSTAGRAM_ENABLED,
+              maxPostsPerDay: MAX_POSTS_PER_DAY,
+              minPostIntervalHours: MIN_POST_INTERVAL_HOURS,
+              dedupeDays: DEDUPE_DAYS,
+              checkIntervalMs: CHECK_INTERVAL_MS,
+              telegramPollingEnabled: TELEGRAM_POLLING_ENABLED,
+              rssInstagramImageOverride: RSS_INSTAGRAM_IMAGE_URL_OVERRIDE || null,
+              rssInstagramTestImage: RSS_INSTAGRAM_TEST_IMAGE_URL || null,
+            },
+          }),
+        );
         return;
       }
       res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
@@ -1782,7 +1970,7 @@ async function main(): Promise<void> {
   }
 
   console.log(
-    `RSS watcher boot: ETSY_SHOP_RSS_URL present=${ETSY_SHOP_RSS_URL ? "yes" : "no"}, state_path=${STATE_PATH}, facebook=${FACEBOOK_ENABLED ? "on" : "off"}, instagram=${INSTAGRAM_ENABLED ? "on" : "off"}`,
+    `RSS watcher boot: service=${SERVICE_NAME} sha=${resolvedBuildInfo?.commitSha ?? "unknown"} rss_url=${ETSY_SHOP_RSS_URL ? "set" : "missing"} state_path=${STATE_PATH} cwd=${process.cwd()} facebook=${FACEBOOK_ENABLED ? "on" : "off"} instagram=${INSTAGRAM_ENABLED ? "on" : "off"} max_per_day=${MAX_POSTS_PER_DAY} min_interval_hours=${MIN_POST_INTERVAL_HOURS} dedupe_days=${DEDUPE_DAYS} check_interval_ms=${CHECK_INTERVAL_MS}`,
   );
   currentState = await loadState();
   await saveState(currentState);

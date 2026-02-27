@@ -24,12 +24,6 @@ export default defineConfig([
     platform: "node",
   },
   {
-    entry: "src/railway/rss-watcher.ts",
-    env,
-    fixedExtension: false,
-    platform: "node",
-  },
-  {
     entry: "src/plugin-sdk/index.ts",
     outDir: "dist/plugin-sdk",
     env,

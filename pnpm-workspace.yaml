@@ -3,6 +3,7 @@ packages:
   - ui
   - packages/*
   - extensions/*
+  - apps/etsy-auto-post
 
 onlyBuiltDependencies:
   - "@lydell/node-pty"

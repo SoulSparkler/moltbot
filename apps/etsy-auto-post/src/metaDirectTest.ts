@@ -1,4 +1,4 @@
-import { resolveFacebookPageAccessToken } from "./infra/meta-instagram.js";
+import { resolveFacebookPageAccessToken } from "./lib/meta-instagram.js";
 
 const META_GRAPH_API_BASE = "https://graph.facebook.com/v18.0";
 

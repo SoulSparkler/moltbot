@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { canonicalizeEtsyUrl } from "../infra/meta-facebook.js";
-import { extractListingId, extractRssImageUrl, isDuplicate, shouldPostNow } from "./rss-watcher.js";
+import { canonicalizeEtsyUrl } from "./lib/meta-facebook.js";
+import { extractListingId, extractRssImageUrl, isDuplicate, shouldPostNow } from "./index.js";
 
 describe("canonicalizeEtsyUrl", () => {
   it("normalizes locale-prefixed listing URLs and strips query params", () => {
