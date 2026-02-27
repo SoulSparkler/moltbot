@@ -161,8 +161,15 @@ fi
 echo "[entrypoint] Token: ${OPENCLAW_GATEWAY_TOKEN:0:8}..."
 echo "[entrypoint] Port: $OPENCLAW_GATEWAY_PORT"
 
-# If first arg is "gateway", run it directly with our configured options
+# Detect gateway invocations (both "gateway" and "node dist/index.js gateway ...")
+is_gateway_cmd=0
 if [ "${1:-}" = "gateway" ]; then
+    is_gateway_cmd=1
+elif [ "${1:-}" = "node" ] && [ "${3:-}" = "gateway" ]; then
+    is_gateway_cmd=1
+fi
+
+if [ "$is_gateway_cmd" -eq 1 ]; then
     echo "[entrypoint] Running gateway with explicit bind=lan and token"
 
     # Force bind mode in config and set browser defaults
@@ -328,19 +335,45 @@ if (googleStatePath && fs.existsSync(googleStatePath)) {
 }
 NODE
 
-    if [ "$(id -u)" -eq 0 ]; then
-        chown -R node:node "$OPENCLAW_DATA_DIR" /app 2>/dev/null || true
-        if command -v su >/dev/null 2>&1; then
-            exec su -p -s /bin/sh node -c "exec node /app/openclaw.mjs gateway run --bind lan --token \"$OPENCLAW_GATEWAY_TOKEN\" --port \"$OPENCLAW_GATEWAY_PORT\" --allow-unconfigured --verbose"
-        fi
+    # Normalize argv so we can append required flags
+    if [ "${1:-}" = "gateway" ]; then
+        prefix=( "node" "/app/openclaw.mjs" "gateway" "run" )
+        set -- "${prefix[@]}" "${@:2}"
+    else
+        # Preserve the node/dist prefix and the gateway subcommand
+        prefix=( "$1" "$2" "gateway" )
+        set -- "${prefix[@]}" "${@:3}"
     fi
 
-    exec node /app/openclaw.mjs gateway run \
-        --bind lan \
-        --token "$OPENCLAW_GATEWAY_TOKEN" \
-        --port "$OPENCLAW_GATEWAY_PORT" \
-        --allow-unconfigured \
-        --verbose
+    has_flag() {
+        local flag="$1"; shift
+        case " $* " in
+            *" $flag "*) return 0 ;;
+            *) return 1 ;;
+        esac
+    }
+
+    if ! has_flag "--port" "$@"; then
+        set -- "$@" --port "$OPENCLAW_GATEWAY_PORT"
+    fi
+    if ! has_flag "--bind" "$@"; then
+        set -- "$@" --bind "lan"
+    fi
+    if ! has_flag "--allow-unconfigured" "$@"; then
+        set -- "$@" --allow-unconfigured
+    fi
+    if ! has_flag "--token" "$@" && ! has_flag "--password" "$@"; then
+        set -- "$@" --token "$OPENCLAW_GATEWAY_TOKEN"
+    fi
+
+    if [ "$(id -u)" -eq 0 ] && command -v su >/dev/null 2>&1; then
+        chown -R node:node "$OPENCLAW_DATA_DIR" /app 2>/dev/null || true
+        echo "[entrypoint] Exec (as node): $*"
+        exec su -p -s /bin/sh node -c "exec $*"
+    fi
+
+    echo "[entrypoint] Exec: $*"
+    exec "$@"
 fi
 
 # Otherwise run whatever was passed
