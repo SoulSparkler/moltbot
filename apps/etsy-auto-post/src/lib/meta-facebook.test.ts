@@ -69,7 +69,9 @@ describe("postFacebookPageEtsyListing", () => {
 
     expect(result.postId).toBe("123_456");
     expect(result.message).toBe("Beautiful vintage piece");
-    expect(result.link).toBe("https://www.etsy.com/listing/1234567890/vintage-vase");
+    expect(result.link).toBe(
+      "https://tresortendance.etsy.com/listing/1234567890/vintage-vase?utm_source=facebook&utm_medium=organic&utm_campaign=autopost",
+    );
 
     const [requestUrl, requestInit] = fetchMock.mock.calls[0] ?? [];
     expect(String(requestUrl)).toBe("https://graph.facebook.com/v18.0/123/feed");
@@ -85,7 +87,7 @@ describe("postFacebookPageEtsyListing", () => {
 
     const body = requestInit?.body as URLSearchParams;
     expect(body.toString()).toContain(
-      "link=https%3A%2F%2Fwww.etsy.com%2Flisting%2F1234567890%2Fvintage-vase",
+      "link=https%3A%2F%2Ftresortendance.etsy.com%2Flisting%2F1234567890%2Fvintage-vase%3Futm_source%3Dfacebook%26utm_medium%3Dorganic%26utm_campaign%3Dautopost",
     );
     expect(body.toString()).toContain("message=Beautiful+vintage+piece");
     expect(body.toString()).not.toContain("ref%3D");

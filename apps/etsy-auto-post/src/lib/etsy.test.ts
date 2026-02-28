@@ -77,6 +77,23 @@ describe("toShareAndSaveUrl", () => {
     );
   });
 
+  it("does not duplicate existing UTM params and preserves other query params", () => {
+    const url = toShareAndSaveUrl(
+      "https://www.etsy.com/listing/99999/abc?utm_source=orig&utm_medium=paid&utm_campaign=old&ref=rss",
+      { utm_source: "facebook", utm_medium: "organic", utm_campaign: "autopost" },
+    );
+
+    expect(url).toBe(
+      "https://tresortendance.etsy.com/listing/99999/abc?utm_source=facebook&utm_medium=organic&utm_campaign=autopost&ref=rss",
+    );
+  });
+
+  it("normalizes configured domain even when protocol or trailing slashes are set", () => {
+    process.env.ETSY_SHARE_AND_SAVE_DOMAIN = "https://customshop.etsy.com/";
+    const url = toShareAndSaveUrl("https://www.etsy.com/listing/888/slug");
+    expect(url).toBe("https://customshop.etsy.com/listing/888/slug");
+  });
+
   it("falls back to the original URL for non-Etsy links", () => {
     const input = "https://example.com/post/123";
     expect(

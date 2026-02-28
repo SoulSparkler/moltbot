@@ -1,4 +1,8 @@
+import { toShareAndSaveUrl } from "./etsy.js";
+
 const META_GRAPH_API_BASE = "https://graph.facebook.com/v18.0";
+const SHARE_AND_SAVE_MEDIUM = "organic";
+const SHARE_AND_SAVE_CAMPAIGN = "autopost";
 
 type MetaGraphResponse = {
   ok: boolean;
@@ -262,12 +266,18 @@ export async function postFacebookPageEtsyListing(params: {
     throw new Error("META_GRAPH_CONFIG_INVALID: accessToken is missing.");
   }
 
-  const link = canonicalizeEtsyUrl(params.etsyListingUrl);
+  const canonical = canonicalizeEtsyUrl(params.etsyListingUrl);
+  const shareAndSaveUrl = toShareAndSaveUrl(canonical, {
+    utm_source: "facebook",
+    utm_medium: SHARE_AND_SAVE_MEDIUM,
+    utm_campaign: SHARE_AND_SAVE_CAMPAIGN,
+  });
+  const link = shareAndSaveUrl;
   const message = stripUrlsFromMessage(params.message);
 
   const url = `${META_GRAPH_API_BASE}/${encodeURIComponent(pageId)}/feed`;
   const body = new URLSearchParams({
-    link,
+    link: shareAndSaveUrl,
     ...(message ? { message } : {}),
   });
 

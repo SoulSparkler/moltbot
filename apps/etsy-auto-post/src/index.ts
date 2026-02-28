@@ -66,6 +66,24 @@ const MIN_POST_INTERVAL_MS = Math.max(0, MIN_POST_INTERVAL_HOURS * 60 * 60 * 100
 const DEDUPE_WINDOW_MS = DEDUPE_DAYS * 24 * 60 * 60 * 1000;
 const SHARE_AND_SAVE_MEDIUM = "organic";
 const SHARE_AND_SAVE_CAMPAIGN = "autopost";
+
+export function buildShareAndSaveUrl(
+  listingUrl: string,
+  source: "facebook" | "instagram",
+): string {
+  return toShareAndSaveUrl(listingUrl, {
+    utm_source: source,
+    utm_medium: SHARE_AND_SAVE_MEDIUM,
+    utm_campaign: SHARE_AND_SAVE_CAMPAIGN,
+  });
+}
+
+export function composeCaptionWithShareUrl(
+  captionText: string,
+  shareAndSaveUrl: string,
+): string {
+  return captionText ? `${captionText}\n${shareAndSaveUrl}` : shareAndSaveUrl;
+}
 let alertsEnabledMemo: boolean | null = null;
 let facebookEnabledMemo: boolean | null = null;
 let instagramEnabledMemo: boolean | null = null;
@@ -1205,19 +1223,15 @@ async function postFacebookItem(params: {
   }
 
   const pageToken = await resolveMetaPageTokenOnce();
-  const shareAndSaveUrl = toShareAndSaveUrl(params.candidate.canonicalListingUrl, {
-    utm_source: "facebook",
-    utm_medium: SHARE_AND_SAVE_MEDIUM,
-    utm_campaign: SHARE_AND_SAVE_CAMPAIGN,
-  });
-  const caption = params.caption.captionText
-    ? `${params.caption.captionText}\n${shareAndSaveUrl}`
-    : shareAndSaveUrl;
+  const shareAndSaveUrl = buildShareAndSaveUrl(params.candidate.canonicalListingUrl, "facebook");
+  const caption = composeCaptionWithShareUrl(params.caption.captionText, shareAndSaveUrl);
 
   const logBase = {
     listingId: params.candidate.listingId,
+    originalListingUrl: params.candidate.link ?? null,
     canonicalListingUrl: params.candidate.canonicalListingUrl,
     shareAndSaveUrl,
+    metaAttachmentUrl: null as string | null,
     imageHost: params.image.imageHost,
     imageSource: params.image.imageSource,
     captionSource: params.caption.captionSource,
@@ -1481,17 +1495,12 @@ async function postInstagramItem(params: {
     return { ok: false, attempted: false, igId, skippedReason: "image_missing" };
   }
 
-  const shareAndSaveUrl = toShareAndSaveUrl(params.candidate.canonicalListingUrl, {
-    utm_source: "instagram",
-    utm_medium: SHARE_AND_SAVE_MEDIUM,
-    utm_campaign: SHARE_AND_SAVE_CAMPAIGN,
-  });
-  const captionForPost = params.caption.captionText
-    ? `${params.caption.captionText}\n${shareAndSaveUrl}`
-    : shareAndSaveUrl;
+  const shareAndSaveUrl = buildShareAndSaveUrl(params.candidate.canonicalListingUrl, "instagram");
+  const captionForPost = composeCaptionWithShareUrl(params.caption.captionText, shareAndSaveUrl);
 
   logMeta("instagram_publish_attempt", {
     listingId: params.candidate.listingId,
+    originalListingUrl: params.candidate.link ?? null,
     canonicalListingUrl: params.candidate.canonicalListingUrl,
     shareAndSaveUrl,
     pageId: META_PAGE_ID,

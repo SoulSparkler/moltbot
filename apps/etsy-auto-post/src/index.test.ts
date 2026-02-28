@@ -1,12 +1,41 @@
 import { describe, expect, it } from "vitest";
 import { canonicalizeEtsyUrl } from "./lib/meta-facebook.js";
-import { extractListingId, extractRssImageUrl, isDuplicate, shouldPostNow } from "./index.js";
+import {
+  buildShareAndSaveUrl,
+  composeCaptionWithShareUrl,
+  extractListingId,
+  extractRssImageUrl,
+  isDuplicate,
+  shouldPostNow,
+} from "./index.js";
 
 describe("canonicalizeEtsyUrl", () => {
   it("normalizes locale-prefixed listing URLs and strips query params", () => {
     expect(
       canonicalizeEtsyUrl("https://www.etsy.com/nl/listing/12345/slug-title?ref=rss&utm_source=x"),
     ).toBe("https://www.etsy.com/listing/12345/slug-title");
+  });
+});
+
+describe("share-and-save URLs", () => {
+  it("builds Facebook share URL on the shop domain with expected UTM params", () => {
+    const url = buildShareAndSaveUrl("https://www.etsy.com/listing/12345/slug-title?ref=rss", "facebook");
+    expect(url).toBe(
+      "https://tresortendance.etsy.com/listing/12345/slug-title?ref=rss&utm_source=facebook&utm_medium=organic&utm_campaign=autopost",
+    );
+  });
+
+  it("builds Instagram share URL on the shop domain with expected UTM params", () => {
+    const url = buildShareAndSaveUrl("https://www.etsy.com/listing/12345/slug-title", "instagram");
+    expect(url).toBe(
+      "https://tresortendance.etsy.com/listing/12345/slug-title?utm_source=instagram&utm_medium=organic&utm_campaign=autopost",
+    );
+  });
+
+  it("composes captions so the Share & Save URL is present exactly once", () => {
+    const share = "https://tresortendance.etsy.com/listing/12345";
+    expect(composeCaptionWithShareUrl("Nice find", share)).toBe("Nice find\nhttps://tresortendance.etsy.com/listing/12345");
+    expect(composeCaptionWithShareUrl("", share)).toBe("https://tresortendance.etsy.com/listing/12345");
   });
 });
 
