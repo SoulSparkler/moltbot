@@ -225,3 +225,62 @@ export function extractEtsyListingImageUrlFromHtml(
 
   return null;
 }
+
+type ShareAndSaveOptions = {
+  utm_source?: string;
+  utm_medium?: string;
+  utm_campaign?: string;
+};
+
+function resolveShareAndSaveDomain(): string | null {
+  const raw = (process.env.ETSY_SHARE_AND_SAVE_DOMAIN ?? "tresortendance.etsy.com").trim();
+  if (!raw) {
+    return null;
+  }
+  return raw.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+}
+
+export function toShareAndSaveUrl(
+  originalUrl: string,
+  options: ShareAndSaveOptions = {},
+): string {
+  const shopDomain = resolveShareAndSaveDomain();
+  if (!shopDomain) {
+    return originalUrl;
+  }
+
+  try {
+    const url = new URL(originalUrl);
+
+    if (!/(\.|^)etsy\.com$/i.test(url.hostname) || !url.pathname.includes("/listing/")) {
+      return originalUrl;
+    }
+
+    const match = url.pathname.match(/\/listing\/(\d+)(?:\/([^/?#]+))?/i);
+    if (!match) {
+      return originalUrl;
+    }
+
+    const [, listingId, slug] = match;
+    const rewritten = new URL(
+      `https://${shopDomain}/listing/${listingId}${slug ? `/${slug}` : ""}`,
+    );
+
+    url.searchParams.forEach((value, key) => {
+      rewritten.searchParams.set(key, value);
+    });
+
+    (["utm_source", "utm_medium", "utm_campaign"] satisfies Array<keyof ShareAndSaveOptions>).forEach(
+      (key) => {
+        const value = options[key];
+        if (typeof value === "string" && value.trim()) {
+          rewritten.searchParams.set(key, value.trim());
+        }
+      },
+    );
+
+    return rewritten.toString();
+  } catch {
+    return originalUrl;
+  }
+}

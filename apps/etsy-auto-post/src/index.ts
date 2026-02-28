@@ -2,7 +2,11 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
-import { extractEtsyListingImageUrlFromHtml, extractEtsyRssImageUrl } from "./lib/etsy.js";
+import {
+  extractEtsyListingImageUrlFromHtml,
+  extractEtsyRssImageUrl,
+  toShareAndSaveUrl,
+} from "./lib/etsy.js";
 import { canonicalizeEtsyUrl, postFacebookPagePhoto } from "./lib/meta-facebook.js";
 import {
   fetchMePermissions,
@@ -60,6 +64,8 @@ const MIN_POST_INTERVAL_HOURS = toNumberOrUndefined(process.env.MIN_POST_INTERVA
 const DEDUPE_DAYS = Math.max(1, toNumberOrUndefined(process.env.DEDUPE_DAYS) ?? 30);
 const MIN_POST_INTERVAL_MS = Math.max(0, MIN_POST_INTERVAL_HOURS * 60 * 60 * 1000);
 const DEDUPE_WINDOW_MS = DEDUPE_DAYS * 24 * 60 * 60 * 1000;
+const SHARE_AND_SAVE_MEDIUM = "organic";
+const SHARE_AND_SAVE_CAMPAIGN = "autopost";
 let alertsEnabledMemo: boolean | null = null;
 let facebookEnabledMemo: boolean | null = null;
 let instagramEnabledMemo: boolean | null = null;
@@ -1199,13 +1205,19 @@ async function postFacebookItem(params: {
   }
 
   const pageToken = await resolveMetaPageTokenOnce();
+  const shareAndSaveUrl = toShareAndSaveUrl(params.candidate.canonicalListingUrl, {
+    utm_source: "facebook",
+    utm_medium: SHARE_AND_SAVE_MEDIUM,
+    utm_campaign: SHARE_AND_SAVE_CAMPAIGN,
+  });
   const caption = params.caption.captionText
-    ? `${params.caption.captionText}\n${params.candidate.canonicalListingUrl}`
-    : params.candidate.canonicalListingUrl;
+    ? `${params.caption.captionText}\n${shareAndSaveUrl}`
+    : shareAndSaveUrl;
 
   const logBase = {
     listingId: params.candidate.listingId,
     canonicalListingUrl: params.candidate.canonicalListingUrl,
+    shareAndSaveUrl,
     imageHost: params.image.imageHost,
     imageSource: params.image.imageSource,
     captionSource: params.caption.captionSource,
@@ -1469,13 +1481,19 @@ async function postInstagramItem(params: {
     return { ok: false, attempted: false, igId, skippedReason: "image_missing" };
   }
 
+  const shareAndSaveUrl = toShareAndSaveUrl(params.candidate.canonicalListingUrl, {
+    utm_source: "instagram",
+    utm_medium: SHARE_AND_SAVE_MEDIUM,
+    utm_campaign: SHARE_AND_SAVE_CAMPAIGN,
+  });
   const captionForPost = params.caption.captionText
-    ? `${params.caption.captionText}\n${params.candidate.canonicalListingUrl}`
-    : params.candidate.canonicalListingUrl;
+    ? `${params.caption.captionText}\n${shareAndSaveUrl}`
+    : shareAndSaveUrl;
 
   logMeta("instagram_publish_attempt", {
     listingId: params.candidate.listingId,
     canonicalListingUrl: params.candidate.canonicalListingUrl,
+    shareAndSaveUrl,
     pageId: META_PAGE_ID,
     igId,
     tokenSource: pageToken.source,
@@ -1501,6 +1519,7 @@ async function postInstagramItem(params: {
     logMeta("instagram_publish_ok", {
       listingId: params.candidate.listingId,
       canonicalListingUrl: params.candidate.canonicalListingUrl,
+      shareAndSaveUrl,
       pageId: META_PAGE_ID,
       igId: result.igUserId,
       creationId: result.creationId,
@@ -1519,6 +1538,7 @@ async function postInstagramItem(params: {
       logMeta("instagram_publish_failed", {
         listingId: params.candidate.listingId,
         canonicalListingUrl: params.candidate.canonicalListingUrl,
+        shareAndSaveUrl,
         pageId: META_PAGE_ID,
         igId,
         tokenSource: pageToken.source,
@@ -1545,6 +1565,7 @@ async function postInstagramItem(params: {
     logMeta("instagram_publish_failed", {
       listingId: params.candidate.listingId,
       canonicalListingUrl: params.candidate.canonicalListingUrl,
+      shareAndSaveUrl,
       pageId: META_PAGE_ID,
       igId,
       imageHost: imageToUse.imageHost,

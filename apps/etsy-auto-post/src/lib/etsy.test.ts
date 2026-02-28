@@ -1,6 +1,10 @@
 import { readFile } from "node:fs/promises";
-import { describe, expect, it } from "vitest";
-import { extractEtsyListingImageUrlFromHtml, extractEtsyRssImageUrl } from "./etsy.js";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  extractEtsyListingImageUrlFromHtml,
+  extractEtsyRssImageUrl,
+  toShareAndSaveUrl,
+} from "./etsy.js";
 
 describe("extractEtsyListingImageUrlFromHtml", () => {
   it("prefers og:image over JSON-LD images when both exist", async () => {
@@ -45,5 +49,44 @@ describe("extractEtsyRssImageUrl", () => {
     };
 
     expect(extractEtsyRssImageUrl(item)).toBe("https://i.etsystatic.com/12345/r/il_rss.jpg");
+  });
+});
+
+describe("toShareAndSaveUrl", () => {
+  const originalDomain = process.env.ETSY_SHARE_AND_SAVE_DOMAIN;
+
+  afterEach(() => {
+    if (originalDomain === undefined) {
+      delete process.env.ETSY_SHARE_AND_SAVE_DOMAIN;
+    } else {
+      process.env.ETSY_SHARE_AND_SAVE_DOMAIN = originalDomain;
+    }
+  });
+
+  it("rewrites Etsy listing URLs to the shop domain and keeps slug + query params", () => {
+    process.env.ETSY_SHARE_AND_SAVE_DOMAIN = "tresortendance.etsy.com";
+
+    const url = toShareAndSaveUrl("https://www.etsy.com/listing/12345/vintage-vase?ref=rss", {
+      utm_source: "facebook",
+      utm_medium: "organic",
+      utm_campaign: "autopost",
+    });
+
+    expect(url).toBe(
+      "https://tresortendance.etsy.com/listing/12345/vintage-vase?ref=rss&utm_source=facebook&utm_medium=organic&utm_campaign=autopost",
+    );
+  });
+
+  it("falls back to the original URL for non-Etsy links", () => {
+    const input = "https://example.com/post/123";
+    expect(
+      toShareAndSaveUrl(input, { utm_source: "facebook", utm_medium: "organic" }),
+    ).toBe(input);
+  });
+
+  it("uses the configured share-and-save domain when provided", () => {
+    process.env.ETSY_SHARE_AND_SAVE_DOMAIN = "customshop.etsy.com";
+    const url = toShareAndSaveUrl("https://www.etsy.com/listing/99999/abc");
+    expect(url).toBe("https://customshop.etsy.com/listing/99999/abc");
   });
 });
