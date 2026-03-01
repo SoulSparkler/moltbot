@@ -31,6 +31,14 @@
 - Telegram ops: `RUN_TELEGRAM_POLLING=true`, plus `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`.
 - Misc: `RSS_STATE_PATH` (optional override), `PORT` set by Railway for the health server.
 
+## Pinterest Smoke Test (one-off)
+
+- Enable `PINTEREST_TEST_MODE=true` along with `PINTEREST_ACCESS_TOKEN` and `PINTEREST_BOARD_ID`.
+- With the service running and the health server enabled, trigger exactly once via `curl -XPOST http://localhost:${PORT:-8080}/pinterest_test`.
+- The smoke test posts `title="TEST PIN - Jannetje"`, `description="Smoke test"`, `link=https://tresortendance.etsy.com`, and `image_url=https://via.placeholder.com/1000x1500.png` to the configured board; the handler logs the returned pin id and URL.
+- The route returns `429` after the first request in a process to avoid spamming; redeploy/restart to rerun if needed.
+- After verification, remove/unset `PINTEREST_TEST_MODE` (and any temporary creds) so the route is disabled.
+
 ## Notes
 
 - The gateway Docker entrypoint no longer launches the RSS watcher sidecar; use the `railway.json` commands above as the single deployment path for Etsy autoposting.

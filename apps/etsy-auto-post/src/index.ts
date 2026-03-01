@@ -55,6 +55,13 @@ const RSS_INSTAGRAM_POLL_TIMEOUT_MS = toNumberOrUndefined(
   process.env.RSS_INSTAGRAM_POLL_TIMEOUT_MS,
 );
 const RSS_INSTAGRAM_TEST_IMAGE_URL = process.env.RSS_INSTAGRAM_TEST_IMAGE_URL?.trim() ?? "";
+const PINTEREST_ACCESS_TOKEN = process.env.PINTEREST_ACCESS_TOKEN?.trim() ?? "";
+const PINTEREST_BOARD_ID = process.env.PINTEREST_BOARD_ID?.trim() ?? "";
+const PINTEREST_TEST_MODE = process.env.PINTEREST_TEST_MODE === "true";
+const PINTEREST_TEST_IMAGE_URL = "https://via.placeholder.com/1000x1500.png";
+const PINTEREST_TEST_LINK = "https://tresortendance.etsy.com";
+const PINTEREST_TEST_TITLE = "TEST PIN - Jannetje";
+const PINTEREST_TEST_DESCRIPTION = "Smoke test";
 const CHECK_INTERVAL_MS = resolveCheckIntervalMs(process.env.RSS_CHECK_INTERVAL_MS);
 const HEALTH_PORT = toNumberOrUndefined(process.env.PORT) ?? 8080;
 const RSS_DISABLE_HEALTH_SERVER = process.env.RSS_DISABLE_HEALTH_SERVER === "1";
@@ -144,6 +151,7 @@ let currentState: WatcherState = {
 };
 let checkInFlight: Promise<void> | null = null;
 let queuedManualRun = false;
+let pinterestTestTriggered = false;
 const STARTED_AT_ISO = new Date().toISOString();
 
 type BuildInfo = {
@@ -285,7 +293,7 @@ function logBuildProof(info: BuildInfo): void {
 
 function logSelfCheck(info: BuildInfo): void {
   console.log(
-    `[self-check] service=${SERVICE_NAME} cwd=${info.cwd} state_path=${STATE_PATH} rss_url=${ETSY_SHOP_RSS_URL ? "set" : "missing"} facebook=${FACEBOOK_ENABLED ? "on" : "off"} instagram=${INSTAGRAM_ENABLED ? "on" : "off"} max_per_day=${MAX_POSTS_PER_DAY} min_interval_hours=${MIN_POST_INTERVAL_HOURS} dedupe_days=${DEDUPE_DAYS} check_interval_ms=${CHECK_INTERVAL_MS} telegram_polling=${TELEGRAM_POLLING_ENABLED ? "on" : "off"}`,
+    `[self-check] service=${SERVICE_NAME} cwd=${info.cwd} state_path=${STATE_PATH} rss_url=${ETSY_SHOP_RSS_URL ? "set" : "missing"} facebook=${FACEBOOK_ENABLED ? "on" : "off"} instagram=${INSTAGRAM_ENABLED ? "on" : "off"} max_per_day=${MAX_POSTS_PER_DAY} min_interval_hours=${MIN_POST_INTERVAL_HOURS} dedupe_days=${DEDUPE_DAYS} check_interval_ms=${CHECK_INTERVAL_MS} telegram_polling=${TELEGRAM_POLLING_ENABLED ? "on" : "off"} pinterest_test_mode=${PINTEREST_TEST_MODE ? "on" : "off"}`,
   );
 }
 
@@ -1656,6 +1664,113 @@ async function postInstagramTest(): Promise<boolean> {
   }
 }
 
+type PinterestTestResult = {
+  ok: boolean;
+  status: number;
+  pinId: string | null;
+  pinUrl: string | null;
+  body: unknown;
+};
+
+function extractStringField(body: unknown, keys: string[]): string | null {
+  if (!body || typeof body !== "object") {
+    return null;
+  }
+  const record = body as Record<string, unknown>;
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function safeJsonParse(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+function formatBodyForLog(body: unknown): string {
+  if (body === null || body === undefined) {
+    return "null";
+  }
+  if (typeof body === "string") {
+    return body;
+  }
+  try {
+    return JSON.stringify(body);
+  } catch {
+    return String(body);
+  }
+}
+
+async function createTestPinterestPin(): Promise<PinterestTestResult> {
+  if (!PINTEREST_ACCESS_TOKEN || !PINTEREST_BOARD_ID) {
+    const missing: string[] = [];
+    if (!PINTEREST_ACCESS_TOKEN) {
+      missing.push("PINTEREST_ACCESS_TOKEN");
+    }
+    if (!PINTEREST_BOARD_ID) {
+      missing.push("PINTEREST_BOARD_ID");
+    }
+    const message = `[pinterest] smoke test aborted: missing ${missing.join(", ")}`;
+    console.log(message);
+    return { ok: false, status: 400, pinId: null, pinUrl: null, body: { error: message } };
+  }
+
+  const payload = {
+    board_id: PINTEREST_BOARD_ID,
+    title: PINTEREST_TEST_TITLE,
+    description: PINTEREST_TEST_DESCRIPTION,
+    link: PINTEREST_TEST_LINK,
+    media_source: {
+      source_type: "image_url" as const,
+      url: PINTEREST_TEST_IMAGE_URL,
+    },
+  };
+
+  console.log(`[pinterest] creating test pin on board_id=${PINTEREST_BOARD_ID}`);
+
+  const response = await fetch("https://api.pinterest.com/v5/pins", {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+      authorization: `Bearer ${PINTEREST_ACCESS_TOKEN}`,
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const responseText = await response.text();
+  const parsedBody = responseText ? safeJsonParse(responseText) : null;
+
+  if (response.ok) {
+    const pinId = extractStringField(parsedBody, ["id", "pin_id"]);
+    const pinUrl = extractStringField(parsedBody, ["url", "link"]);
+    console.log(
+      `[pinterest] smoke test succeeded: status=${response.status} pin_id=${pinId ?? "unknown"} url=${pinUrl ?? "unknown"}`,
+    );
+    return { ok: true, status: response.status, pinId: pinId ?? null, pinUrl: pinUrl ?? null, body: parsedBody };
+  }
+
+  const bodyForLog = parsedBody ?? (responseText || "empty");
+  console.log(
+    `[pinterest] smoke test failed: status=${response.status} body=${formatBodyForLog(bodyForLog)}`,
+  );
+
+  return {
+    ok: false,
+    status: response.status,
+    pinId: null,
+    pinUrl: null,
+    body: parsedBody ?? responseText,
+  };
+}
+
 async function fetchFeed(url: string): Promise<FeedItem[]> {
   const response = await fetch(url, {
     headers: {
@@ -1955,12 +2070,13 @@ async function main(): Promise<void> {
           startedAt: STARTED_AT_ISO,
           cwd: process.cwd(),
         } satisfies BuildInfo);
-      if (req.url === "/health") {
+      const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+      if (url.pathname === "/health") {
         res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ ok: true }));
         return;
       }
-      if (req.url === "/self-check") {
+      if (url.pathname === "/self-check") {
         res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
         res.end(
           JSON.stringify({
@@ -1981,9 +2097,41 @@ async function main(): Promise<void> {
               telegramPollingEnabled: TELEGRAM_POLLING_ENABLED,
               rssInstagramImageOverride: RSS_INSTAGRAM_IMAGE_URL_OVERRIDE || null,
               rssInstagramTestImage: RSS_INSTAGRAM_TEST_IMAGE_URL || null,
+              pinterestTestMode: PINTEREST_TEST_MODE,
             },
           }),
         );
+        return;
+      }
+      if (url.pathname === "/pinterest_test" && PINTEREST_TEST_MODE) {
+        if (req.method !== "POST") {
+          res.writeHead(405, { "content-type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: false, error: "use POST /pinterest_test" }));
+          return;
+        }
+        if (pinterestTestTriggered) {
+          res.writeHead(429, { "content-type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: false, error: "pinterest test already triggered" }));
+          return;
+        }
+        pinterestTestTriggered = true;
+        void createTestPinterestPin()
+          .then((result) => {
+            if (res.writableEnded) {
+              return;
+            }
+            res.writeHead(result.ok ? 200 : result.status || 500, {
+              "content-type": "application/json; charset=utf-8",
+            });
+            res.end(JSON.stringify(result));
+          })
+          .catch((error) => {
+            console.log(`[pinterest] smoke test handler error: ${String(error)}`);
+            if (!res.writableEnded) {
+              res.writeHead(500, { "content-type": "application/json; charset=utf-8" });
+              res.end(JSON.stringify({ ok: false, error: "pinterest test handler error" }));
+            }
+          });
         return;
       }
       res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
