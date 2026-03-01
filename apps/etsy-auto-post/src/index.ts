@@ -1087,10 +1087,6 @@ function resolveFacebookEnablement(): FacebookEnablement {
   return facebookEnablementMemo;
 }
 
-function facebookEnabled(): boolean {
-  return resolveFacebookEnablement().enabled;
-}
-
 function instagramEnabled(): boolean {
   if (instagramEnabledMemo !== null) {
     return instagramEnabledMemo;
