@@ -5,6 +5,7 @@ import {
   composeCaptionWithShareUrl,
   extractListingId,
   extractRssImageUrl,
+  classifyFeedItems,
   isDuplicate,
   shouldPostNow,
 } from "./index.js";
@@ -75,6 +76,109 @@ describe("isDuplicate", () => {
     expect(isDuplicate("123", state, nowMs, { dedupeWindowMs: 30 * 24 * 60 * 60 * 1000 })).toBe(
       false,
     );
+  });
+});
+
+describe("classifyFeedItems", () => {
+  const nowMs = Date.UTC(2025, 0, 2, 12, 0, 0);
+
+  it("marks recently posted listings as duplicates", () => {
+    const state = {
+      seenIds: [],
+      initialized: true,
+      telegramOffset: 0,
+      posted_listing_ids: { "123": new Date(nowMs - 2 * 60 * 60 * 1000).toISOString() },
+    };
+
+    const feedItems = [
+      {
+        id: "https://www.etsy.com/listing/123/first",
+        title: "Item 123",
+        link: "https://www.etsy.com/listing/123/first",
+        publishedAt: new Date(nowMs - 3 * 60 * 60 * 1000).toISOString(),
+        publishedAtMs: nowMs - 3 * 60 * 60 * 1000,
+      },
+      {
+        id: "https://www.etsy.com/listing/456/second",
+        title: "Item 456",
+        link: "https://www.etsy.com/listing/456/second",
+        publishedAt: new Date(nowMs - 1 * 60 * 60 * 1000).toISOString(),
+        publishedAtMs: nowMs - 1 * 60 * 60 * 1000,
+      },
+    ];
+
+    const result = classifyFeedItems({
+      feedItems,
+      state,
+      gate: { ok: true },
+      nowMs,
+      ignoreDedupe: false,
+    });
+
+    expect(result.decisions[0].decision).toBe("SKIP");
+    expect(result.decisions[0].reason).toBe("dedupe_window");
+    expect(result.decisions[0].lastPostedAt).toBe(state.posted_listing_ids["123"]);
+    expect(result.eligibleCandidates.map((c) => c.listingId)).toEqual(["456"]);
+  });
+
+  it("allows manual override of dedupe", () => {
+    const state = {
+      seenIds: [],
+      initialized: true,
+      telegramOffset: 0,
+      posted_listing_ids: { "123": new Date(nowMs - 2 * 60 * 60 * 1000).toISOString() },
+    };
+
+    const feedItems = [
+      {
+        id: "https://www.etsy.com/listing/123/first",
+        title: "Item 123",
+        link: "https://www.etsy.com/listing/123/first",
+        publishedAt: new Date(nowMs - 3 * 60 * 60 * 1000).toISOString(),
+        publishedAtMs: nowMs - 3 * 60 * 60 * 1000,
+      },
+    ];
+
+    const result = classifyFeedItems({
+      feedItems,
+      state,
+      gate: { ok: true },
+      nowMs,
+      ignoreDedupe: true,
+    });
+
+    expect(result.decisions[0].decision).toBe("NEW");
+    expect(result.decisions[0].reason).toBe("dedupe_ignored");
+    expect(result.eligibleCandidates.map((c) => c.listingId)).toEqual(["123"]);
+  });
+
+  it("marks duplicate listing IDs in the same feed", () => {
+    const state = { seenIds: [], initialized: true, telegramOffset: 0 };
+    const feedItems = [
+      {
+        id: "https://www.etsy.com/listing/999/first",
+        title: "Item A",
+        link: "https://www.etsy.com/listing/999/first",
+      },
+      {
+        id: "https://www.etsy.com/listing/999/second",
+        title: "Item A duplicate",
+        link: "https://www.etsy.com/listing/999/second",
+      },
+    ];
+
+    const result = classifyFeedItems({
+      feedItems,
+      state,
+      gate: { ok: true },
+      nowMs,
+    });
+
+    expect(result.decisions[0].decision).toBe("NEW");
+    expect(result.decisions[1].decision).toBe("SKIP");
+    expect(result.decisions[1].reason).toBe("duplicate_in_feed");
+    expect(result.eligibleCandidates).toHaveLength(1);
+    expect(result.eligibleCandidates[0].listingId).toBe("999");
   });
 });
 

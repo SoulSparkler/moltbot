@@ -70,6 +70,15 @@ const MIN_POST_INTERVAL_HOURS = toNumberOrUndefined(process.env.MIN_POST_INTERVA
 const DEDUPE_DAYS = Math.max(1, toNumberOrUndefined(process.env.DEDUPE_DAYS) ?? 30);
 const MIN_POST_INTERVAL_MS = Math.max(0, MIN_POST_INTERVAL_HOURS * 60 * 60 * 1000);
 const DEDUPE_WINDOW_MS = DEDUPE_DAYS * 24 * 60 * 60 * 1000;
+const HEARTBEAT_INTERVAL_MS = Math.max(
+  5 * 60 * 1000,
+  toNumberOrUndefined(process.env.RSS_HEARTBEAT_INTERVAL_MS) ?? 10 * 60 * 1000,
+);
+const IGNORE_DEDUPE =
+  process.env.RSS_IGNORE_DEDUPE === "1" ||
+  process.env.RSS_IGNORE_DEDUPE === "true" ||
+  process.env.IGNORE_DEDUPE === "1" ||
+  process.env.IGNORE_DEDUPE === "true";
 const SHARE_AND_SAVE_MEDIUM = "organic";
 const SHARE_AND_SAVE_CAMPAIGN = "autopost";
 
@@ -152,6 +161,7 @@ let currentState: WatcherState = {
 let checkInFlight: Promise<void> | null = null;
 let queuedManualRun = false;
 let pinterestTestTriggered = false;
+let lastRunSummary: RunSummary | null = null;
 const STARTED_AT_ISO = new Date().toISOString();
 
 type BuildInfo = {
@@ -164,10 +174,18 @@ type BuildInfo = {
   cwd: string;
 };
 
+type EmbeddedBuildInfo = {
+  commitSha?: string;
+  commitSource?: string;
+  buildTime?: string;
+  buildTimeSource?: string;
+};
+
 const COMMIT_ENV_KEYS = [
   "RAILWAY_GIT_COMMIT_SHA",
   "RAILWAY_COMMIT_SHA",
   "GIT_COMMIT_SHA",
+  "GIT_SHA",
   "GITHUB_SHA",
   "VERCEL_GIT_COMMIT_SHA",
   "SOURCE_VERSION",
@@ -214,6 +232,20 @@ async function readFileSafe(path: string): Promise<string | null> {
   }
 }
 
+async function readEmbeddedBuildInfo(): Promise<EmbeddedBuildInfo | null> {
+  try {
+    const path = fileURLToPath(new URL("./build-info.json", import.meta.url));
+    const raw = await readFile(path, "utf8");
+    const parsed = JSON.parse(raw) as EmbeddedBuildInfo;
+    if (!parsed || typeof parsed !== "object") {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 async function findGitRoot(): Promise<string | null> {
   let cursor = fileURLToPath(new URL(".", import.meta.url));
   for (let depth = 0; depth < 6; depth += 1) {
@@ -244,10 +276,16 @@ async function readGitSha(gitDir: string): Promise<string | null> {
   return head || null;
 }
 
-async function resolveGitCommit(): Promise<{ sha: string | null; source: string }> {
+async function resolveGitCommit(
+  fallbackSha: string | null,
+): Promise<{ sha: string | null; source: string }> {
   const envCommit = resolveEnvValue(COMMIT_ENV_KEYS);
   if (envCommit.value) {
     return { sha: envCommit.value, source: envCommit.source ?? "env" };
+  }
+
+  if (fallbackSha) {
+    return { sha: fallbackSha, source: "embedded" };
   }
 
   const gitDir = await findGitRoot();
@@ -270,15 +308,19 @@ async function resolvePackageVersion(): Promise<string> {
 }
 
 async function resolveBuildInfo(): Promise<BuildInfo> {
-  const { sha, source } = await resolveGitCommit();
+  const embedded = await readEmbeddedBuildInfo();
+  const { sha, source } = await resolveGitCommit(embedded?.commitSha ?? null);
   const buildTimeEnv = resolveEnvValue(BUILD_TIME_ENV_KEYS);
-  const buildTime = buildTimeEnv.value ?? STARTED_AT_ISO;
+  const buildTime = buildTimeEnv.value ?? embedded?.buildTime ?? STARTED_AT_ISO;
+  const buildTimeSource =
+    buildTimeEnv.source ??
+    (buildTimeEnv.value ? "env" : embedded?.buildTime ? "embedded" : "startup");
 
   return {
     commitSha: sha ?? "unknown",
     commitSource: source,
     buildTime,
-    buildTimeSource: buildTimeEnv.source ?? (buildTimeEnv.value ? "env" : "startup"),
+    buildTimeSource,
     version: await resolvePackageVersion(),
     startedAt: STARTED_AT_ISO,
     cwd: process.cwd(),
@@ -293,7 +335,7 @@ function logBuildProof(info: BuildInfo): void {
 
 function logSelfCheck(info: BuildInfo): void {
   console.log(
-    `[self-check] service=${SERVICE_NAME} cwd=${info.cwd} state_path=${STATE_PATH} rss_url=${ETSY_SHOP_RSS_URL ? "set" : "missing"} facebook=${FACEBOOK_ENABLED ? "on" : "off"} instagram=${INSTAGRAM_ENABLED ? "on" : "off"} max_per_day=${MAX_POSTS_PER_DAY} min_interval_hours=${MIN_POST_INTERVAL_HOURS} dedupe_days=${DEDUPE_DAYS} check_interval_ms=${CHECK_INTERVAL_MS} telegram_polling=${TELEGRAM_POLLING_ENABLED ? "on" : "off"} pinterest_test_mode=${PINTEREST_TEST_MODE ? "on" : "off"}`,
+    `[self-check] service=${SERVICE_NAME} cwd=${info.cwd} state_path=${STATE_PATH} rss_url=${ETSY_SHOP_RSS_URL || "missing"} facebook=${FACEBOOK_ENABLED ? "on" : "off"} instagram=${INSTAGRAM_ENABLED ? "on" : "off"} max_per_day=${MAX_POSTS_PER_DAY} min_interval_hours=${MIN_POST_INTERVAL_HOURS} dedupe_days=${DEDUPE_DAYS} ignore_dedupe=${IGNORE_DEDUPE} check_interval_ms=${CHECK_INTERVAL_MS} telegram_polling=${TELEGRAM_POLLING_ENABLED ? "on" : "off"} pinterest_test_mode=${PINTEREST_TEST_MODE ? "on" : "off"}`,
   );
 }
 
@@ -623,6 +665,53 @@ type PublishResult = {
   fbtraceId?: string | null;
   error?: unknown;
   skippedReason?: string;
+};
+
+type DiagnosticsDecision = {
+  index: number;
+  feedId: string;
+  listingId: string | null;
+  canonicalListingUrl: string | null;
+  link: string;
+  publishedAt: string | null;
+  publishedAtMs: number | null;
+  decision: "NEW" | "SKIP";
+  reason: string;
+  lastPostedAt?: string | null;
+};
+
+type DiagnosticsReport = {
+  ok: boolean;
+  rssUrl: string | null;
+  fetchedCount: number;
+  inspectedCount: number;
+  ignoreDedupe: boolean;
+  statePath: string;
+  gate: {
+    ok: boolean;
+    reason?: string;
+    maxPostsPerDay: number;
+    minPostIntervalHours: number;
+    last_successful_post_at?: string;
+    last_attempted_post_at?: string;
+  };
+  items: DiagnosticsDecision[];
+  error?: string;
+  timestamp: string;
+};
+
+type RunSummary = {
+  at: number;
+  trigger: "startup" | "scheduled" | "manual";
+  fetched: number;
+  inspected: number;
+  newItems: number;
+  selectedListingId: string | null;
+  gate: { ok: boolean; reason?: string };
+  ignoreDedupe: boolean;
+  lastSuccessfulPostAt?: string;
+  lastAttemptedPostAt?: string;
+  posted: { facebook: boolean; instagram: boolean };
 };
 
 function toListingCandidate(item: FeedItem): ListingCandidate | null {
@@ -1795,6 +1884,79 @@ function recordPostedItem(
   state.posted_at_by_id[params.itemId] = params.postedAtIso;
 }
 
+export function classifyFeedItems(params: {
+  feedItems: FeedItem[];
+  state: WatcherState;
+  gate: ReturnType<typeof shouldPostNow>;
+  nowMs: number;
+  ignoreDedupe?: boolean;
+}): { decisions: DiagnosticsDecision[]; eligibleCandidates: ListingCandidate[] } {
+  const ignoreDedupe = params.ignoreDedupe === true;
+  const seenListingIds = new Set<string>();
+  const decisions: DiagnosticsDecision[] = [];
+  const eligibleCandidates: ListingCandidate[] = [];
+
+  for (let index = 0; index < params.feedItems.length; index += 1) {
+    const item = params.feedItems[index];
+    const candidate = toListingCandidate(item);
+    if (!candidate) {
+      decisions.push({
+        index: index + 1,
+        feedId: item.id,
+        listingId: null,
+        canonicalListingUrl: null,
+        link: item.link,
+        publishedAt: item.publishedAt ?? null,
+        publishedAtMs: item.publishedAtMs ?? null,
+        decision: "SKIP",
+        reason: "no_listing_id",
+      });
+      continue;
+    }
+
+    const duplicateInFeed = seenListingIds.has(candidate.listingId);
+    seenListingIds.add(candidate.listingId);
+
+    let decision: DiagnosticsDecision["decision"] = "NEW";
+    let reason = "eligible";
+    const lastPostedAt = params.state.posted_listing_ids?.[candidate.listingId] ?? null;
+    const dedupeHit = isDuplicate(candidate.listingId, params.state, params.nowMs);
+
+    if (duplicateInFeed) {
+      decision = "SKIP";
+      reason = "duplicate_in_feed";
+    } else if (!params.gate.ok) {
+      decision = "SKIP";
+      reason = `gated:${params.gate.reason ?? "unknown"}`;
+    } else if (dedupeHit && !ignoreDedupe) {
+      decision = "SKIP";
+      reason = "dedupe_window";
+    } else if (dedupeHit && ignoreDedupe) {
+      decision = "NEW";
+      reason = "dedupe_ignored";
+    }
+
+    decisions.push({
+      index: index + 1,
+      feedId: item.id,
+      listingId: candidate.listingId,
+      canonicalListingUrl: candidate.canonicalListingUrl,
+      link: item.link,
+      publishedAt: item.publishedAt ?? null,
+      publishedAtMs: item.publishedAtMs ?? null,
+      decision,
+      reason,
+      ...(lastPostedAt ? { lastPostedAt } : {}),
+    });
+
+    if (decision === "NEW") {
+      eligibleCandidates.push(candidate);
+    }
+  }
+
+  return { decisions, eligibleCandidates };
+}
+
 async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<void> {
   await runMetaHealthcheck();
 
@@ -1809,6 +1971,22 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
     const items = await fetchFeed(ETSY_SHOP_RSS_URL);
     if (items.length === 0) {
       console.log(`[rss] ${trigger}: feed returned 0 items.`);
+      console.log(
+        `[rss][metrics] trigger=${trigger} fetched=0 inspected=0 new=0 skipped_dedupe=0 skipped_feed_dup=0 skipped_missing_id=0 ignore_dedupe=${IGNORE_DEDUPE}`,
+      );
+      lastRunSummary = {
+        at: Date.now(),
+        trigger,
+        fetched: 0,
+        inspected: 0,
+        newItems: 0,
+        selectedListingId: null,
+        gate: { ok: true },
+        ignoreDedupe: IGNORE_DEDUPE,
+        lastSuccessfulPostAt: currentState.last_successful_post_at,
+        lastAttemptedPostAt: currentState.last_attempted_post_at,
+        posted: { facebook: false, instagram: false },
+      };
       return;
     }
 
@@ -1824,29 +2002,74 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
         reason: gate.reason,
         last_successful_post_at: currentState.last_successful_post_at ?? null,
       });
+      console.log(
+        `[rss][metrics] trigger=${trigger} fetched=${items.length} inspected=0 new=0 skipped_dedupe=0 skipped_feed_dup=0 skipped_missing_id=0 gate_reason=${gate.reason ?? "unknown"} ignore_dedupe=${IGNORE_DEDUPE}`,
+      );
+      lastRunSummary = {
+        at: nowMs,
+        trigger,
+        fetched: items.length,
+        inspected: 0,
+        newItems: 0,
+        selectedListingId: null,
+        gate,
+        ignoreDedupe: IGNORE_DEDUPE,
+        lastSuccessfulPostAt: currentState.last_successful_post_at,
+        lastAttemptedPostAt: currentState.last_attempted_post_at,
+        posted: { facebook: false, instagram: false },
+      };
       return;
     }
 
-    const candidates = items
-      .map(toListingCandidate)
-      .filter((entry): entry is ListingCandidate => Boolean(entry));
+    const classification = classifyFeedItems({
+      feedItems: items,
+      state: currentState,
+      gate,
+      nowMs,
+      ignoreDedupe: IGNORE_DEDUPE,
+    });
 
-    const uniqueCandidates: ListingCandidate[] = [];
-    const seenListingIds = new Set<string>();
-    for (const candidate of candidates) {
-      if (seenListingIds.has(candidate.listingId)) {
-        continue;
+    const decisions = classification.decisions;
+    const eligible = classification.eligibleCandidates;
+
+    const skippedDedupe = decisions.filter((d) => d.reason.startsWith("dedupe")).length;
+    const skippedFeedDup = decisions.filter((d) => d.reason === "duplicate_in_feed").length;
+    const skippedMissingId = decisions.filter((d) => d.reason === "no_listing_id").length;
+
+    for (const decision of decisions) {
+      if (decision.decision === "SKIP") {
+        console.log(
+          `[rss][decision] listing=${decision.listingId ?? "n/a"} decision=SKIP reason=${decision.reason} published=${decision.publishedAt ?? "unknown"} last_posted_at=${decision.lastPostedAt ?? "never"} link=${decision.canonicalListingUrl ?? decision.link}`,
+        );
       }
-      seenListingIds.add(candidate.listingId);
-      uniqueCandidates.push(candidate);
     }
 
-    const eligible = uniqueCandidates.filter(
-      (candidate) => !isDuplicate(candidate.listingId, currentState, nowMs),
+    console.log(
+      `[rss][metrics] trigger=${trigger} fetched=${items.length} inspected=${decisions.length} new=${eligible.length} skipped_dedupe=${skippedDedupe} skipped_feed_dup=${skippedFeedDup} skipped_missing_id=${skippedMissingId} ignore_dedupe=${IGNORE_DEDUPE}`,
     );
 
     if (eligible.length === 0) {
-      logMeta("no_eligible_items", { reason: "duplicates_or_empty", dedupe_days: DEDUPE_DAYS });
+      logMeta("no_eligible_items", {
+        reason: "duplicates_or_empty",
+        dedupe_days: DEDUPE_DAYS,
+        ignore_dedupe: IGNORE_DEDUPE,
+        skipped_dedupe: skippedDedupe,
+        skipped_feed_dup: skippedFeedDup,
+        skipped_missing_id: skippedMissingId,
+      });
+      lastRunSummary = {
+        at: nowMs,
+        trigger,
+        fetched: items.length,
+        inspected: decisions.length,
+        newItems: 0,
+        selectedListingId: null,
+        gate,
+        ignoreDedupe: IGNORE_DEDUPE,
+        lastSuccessfulPostAt: currentState.last_successful_post_at,
+        lastAttemptedPostAt: currentState.last_attempted_post_at,
+        posted: { facebook: false, instagram: false },
+      };
       return;
     }
 
@@ -1864,6 +2087,7 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
       listingId: selected.listingId,
       canonicalListingUrl: selected.canonicalListingUrl,
       publishedAt: selected.publishedAt ?? null,
+      ignore_dedupe: IGNORE_DEDUPE,
     });
 
     const caption = await buildCaption({
@@ -1884,11 +2108,13 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
       return;
     }
 
-    const attemptAtIso = new Date(nowMs).toISOString();
-    currentState.last_attempted_post_at = attemptAtIso;
-
     const fbResult = await postFacebookItem({ candidate: selected, caption, image });
     const igResult = await postInstagramItem({ candidate: selected, caption, image });
+
+    const attemptedAny = fbResult.attempted || igResult.attempted;
+    if (attemptedAny) {
+      currentState.last_attempted_post_at = new Date(nowMs).toISOString();
+    }
 
     const fbSuccess =
       fbResult.ok && fbResult.attempted && Boolean(fbResult.postId || fbResult.photoId);
@@ -1939,15 +2165,138 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
       });
     }
 
+    console.log(
+      `[rss][metrics] posted_fb=${fbSuccess ? 1 : 0} posted_ig=${igSuccess ? 1 : 0} attempted_fb=${fbResult.attempted ? 1 : 0} attempted_ig=${igResult.attempted ? 1 : 0} ignore_dedupe=${IGNORE_DEDUPE}`,
+    );
+
     currentState.seenIds = Array.from(
       new Set([selected.id, ...currentState.seenIds].filter(Boolean)),
     ).slice(0, MAX_SEEN_IDS);
     await saveState(currentState);
+
+    lastRunSummary = {
+      at: nowMs,
+      trigger,
+      fetched: items.length,
+      inspected: decisions.length,
+      newItems: eligible.length,
+      selectedListingId: selected.listingId,
+      gate,
+      ignoreDedupe: IGNORE_DEDUPE,
+      lastSuccessfulPostAt: currentState.last_successful_post_at,
+      lastAttemptedPostAt: currentState.last_attempted_post_at,
+      posted: { facebook: fbSuccess, instagram: igSuccess },
+    };
   } catch (error) {
     console.log(`[rss] ${trigger} check failed: ${String(error)}`);
     if (trigger === "manual" && alertsEnabled()) {
       await sendTelegramText(`RSS run failed: ${String(error)}`);
     }
+  }
+}
+
+async function collectDiagnostics(limit = 5): Promise<DiagnosticsReport> {
+  const nowMs = Date.now();
+  const state = await loadState();
+  const gate = shouldPostNow(state, nowMs);
+
+  if (!ETSY_SHOP_RSS_URL) {
+    return {
+      ok: false,
+      rssUrl: null,
+      fetchedCount: 0,
+      inspectedCount: 0,
+      ignoreDedupe: IGNORE_DEDUPE,
+      statePath: STATE_PATH,
+      gate: {
+        ...gate,
+        maxPostsPerDay: MAX_POSTS_PER_DAY,
+        minPostIntervalHours: MIN_POST_INTERVAL_HOURS,
+        last_successful_post_at: state.last_successful_post_at,
+        last_attempted_post_at: state.last_attempted_post_at,
+      },
+      items: [],
+      error: "rss_url_missing",
+      timestamp: new Date(nowMs).toISOString(),
+    };
+  }
+
+  let feedItems: FeedItem[];
+  try {
+    feedItems = await fetchFeed(ETSY_SHOP_RSS_URL);
+  } catch (error) {
+    return {
+      ok: false,
+      rssUrl: ETSY_SHOP_RSS_URL,
+      fetchedCount: 0,
+      inspectedCount: 0,
+      ignoreDedupe: IGNORE_DEDUPE,
+      statePath: STATE_PATH,
+      gate: {
+        ...gate,
+        maxPostsPerDay: MAX_POSTS_PER_DAY,
+        minPostIntervalHours: MIN_POST_INTERVAL_HOURS,
+        last_successful_post_at: state.last_successful_post_at,
+        last_attempted_post_at: state.last_attempted_post_at,
+      },
+      items: [],
+      error: `feed_fetch_failed:${String(error)}`,
+      timestamp: new Date(nowMs).toISOString(),
+    };
+  }
+
+  const inspected = feedItems.slice(0, Math.max(1, limit));
+  const classification = classifyFeedItems({
+    feedItems: inspected,
+    state,
+    gate,
+    nowMs,
+    ignoreDedupe: IGNORE_DEDUPE,
+  });
+
+  return {
+    ok: true,
+    rssUrl: ETSY_SHOP_RSS_URL,
+    fetchedCount: feedItems.length,
+    inspectedCount: inspected.length,
+    ignoreDedupe: IGNORE_DEDUPE,
+    statePath: STATE_PATH,
+    gate: {
+      ...gate,
+      maxPostsPerDay: MAX_POSTS_PER_DAY,
+      minPostIntervalHours: MIN_POST_INTERVAL_HOURS,
+      last_successful_post_at: state.last_successful_post_at,
+      last_attempted_post_at: state.last_attempted_post_at,
+    },
+    items: classification.decisions,
+    timestamp: new Date(nowMs).toISOString(),
+  };
+}
+
+async function runDiagnostics(): Promise<void> {
+  const buildInfo = await resolveBuildInfo();
+  resolvedBuildInfo = buildInfo;
+  logBuildProof(buildInfo);
+  logSelfCheck(buildInfo);
+
+  const report = await collectDiagnostics();
+  if (!report.ok) {
+    console.log(
+      `[diagnostics] ok=${report.ok} rss_url=${report.rssUrl ?? "missing"} state_path=${report.statePath} error=${report.error ?? "unknown"}`,
+    );
+    return;
+  }
+
+  const eligibleCount = report.items.filter((item) => item.decision === "NEW").length;
+  console.log(
+    `[diagnostics] rss_url=${report.rssUrl} state_path=${report.statePath} fetched=${report.fetchedCount} inspected=${report.inspectedCount} new=${eligibleCount} gate_ok=${report.gate.ok} gate_reason=${report.gate.reason ?? "none"} ignore_dedupe=${report.ignoreDedupe} last_successful_post_at=${report.gate.last_successful_post_at ?? "n/a"} last_attempted_post_at=${report.gate.last_attempted_post_at ?? "n/a"}`,
+  );
+
+  for (const item of report.items) {
+    const lastPosted = item.lastPostedAt ?? "never";
+    console.log(
+      `[diagnostics] #${item.index} listing=${item.listingId ?? "n/a"} published=${item.publishedAt ?? "unknown"} decision=${item.decision} reason=${item.reason} last_posted_at=${lastPosted} link=${item.canonicalListingUrl ?? item.link}`,
+    );
   }
 }
 
@@ -2048,6 +2397,16 @@ async function pollTelegramForCommands(): Promise<void> {
   }
 }
 
+function logHeartbeat(): void {
+  const now = Date.now();
+  const last = lastRunSummary;
+  const nextAtMs = last ? last.at + CHECK_INTERVAL_MS : now + CHECK_INTERVAL_MS;
+  const nextInMs = Math.max(0, nextAtMs - now);
+  console.log(
+    `[rss][heartbeat] now=${new Date(now).toISOString()} last_run=${last ? new Date(last.at).toISOString() : "never"} last_trigger=${last?.trigger ?? "n/a"} last_gate_ok=${last?.gate.ok ?? false} last_gate_reason=${last?.gate.reason ?? "none"} last_selected=${last?.selectedListingId ?? "none"} last_successful_post_at=${currentState.last_successful_post_at ?? "none"} last_attempted_post_at=${currentState.last_attempted_post_at ?? "none"} next_run_in_ms=${nextInMs} ignore_dedupe=${IGNORE_DEDUPE} state_path=${STATE_PATH}`,
+  );
+}
+
 async function main(): Promise<void> {
   const buildInfo = await resolveBuildInfo();
   resolvedBuildInfo = buildInfo;
@@ -2087,12 +2446,14 @@ async function main(): Promise<void> {
               cwd: process.cwd(),
               statePath: STATE_PATH,
               stateDir: dirname(STATE_PATH),
+              rssUrl: ETSY_SHOP_RSS_URL || null,
               rssUrlPresent: Boolean(ETSY_SHOP_RSS_URL),
               facebookEnabled: FACEBOOK_ENABLED,
               instagramEnabled: INSTAGRAM_ENABLED,
               maxPostsPerDay: MAX_POSTS_PER_DAY,
               minPostIntervalHours: MIN_POST_INTERVAL_HOURS,
               dedupeDays: DEDUPE_DAYS,
+              ignoreDedupe: IGNORE_DEDUPE,
               checkIntervalMs: CHECK_INTERVAL_MS,
               telegramPollingEnabled: TELEGRAM_POLLING_ENABLED,
               rssInstagramImageOverride: RSS_INSTAGRAM_IMAGE_URL_OVERRIDE || null,
@@ -2101,6 +2462,25 @@ async function main(): Promise<void> {
             },
           }),
         );
+        return;
+      }
+      if (url.pathname === "/diagnostics") {
+        void collectDiagnostics()
+          .then((report) => {
+            if (res.writableEnded) {
+              return;
+            }
+            res.writeHead(report.ok ? 200 : 503, {
+              "content-type": "application/json; charset=utf-8",
+            });
+            res.end(JSON.stringify(report));
+          })
+          .catch((error) => {
+            if (!res.writableEnded) {
+              res.writeHead(500, { "content-type": "application/json; charset=utf-8" });
+              res.end(JSON.stringify({ ok: false, error: `diagnostics_failed:${String(error)}` }));
+            }
+          });
         return;
       }
       if (url.pathname === "/pinterest_test" && PINTEREST_TEST_MODE) {
@@ -2147,7 +2527,7 @@ async function main(): Promise<void> {
   }
 
   console.log(
-    `RSS watcher boot: service=${SERVICE_NAME} sha=${resolvedBuildInfo?.commitSha ?? "unknown"} rss_url=${ETSY_SHOP_RSS_URL ? "set" : "missing"} state_path=${STATE_PATH} cwd=${process.cwd()} facebook=${FACEBOOK_ENABLED ? "on" : "off"} instagram=${INSTAGRAM_ENABLED ? "on" : "off"} max_per_day=${MAX_POSTS_PER_DAY} min_interval_hours=${MIN_POST_INTERVAL_HOURS} dedupe_days=${DEDUPE_DAYS} check_interval_ms=${CHECK_INTERVAL_MS}`,
+    `RSS watcher boot: service=${SERVICE_NAME} sha=${resolvedBuildInfo?.commitSha ?? "unknown"} rss_url=${ETSY_SHOP_RSS_URL || "missing"} state_path=${STATE_PATH} cwd=${process.cwd()} facebook=${FACEBOOK_ENABLED ? "on" : "off"} instagram=${INSTAGRAM_ENABLED ? "on" : "off"} max_per_day=${MAX_POSTS_PER_DAY} min_interval_hours=${MIN_POST_INTERVAL_HOURS} dedupe_days=${DEDUPE_DAYS} ignore_dedupe=${IGNORE_DEDUPE} check_interval_ms=${CHECK_INTERVAL_MS}`,
   );
   currentState = await loadState();
   await saveState(currentState);
@@ -2156,12 +2536,25 @@ async function main(): Promise<void> {
   setInterval(() => {
     void scheduleCheck("scheduled");
   }, CHECK_INTERVAL_MS).unref();
+  logHeartbeat();
+  setInterval(() => {
+    logHeartbeat();
+  }, HEARTBEAT_INTERVAL_MS).unref();
   void pollTelegramForCommands();
 }
 
+const CLI_MODE = (process.argv[2] ?? "").trim().toLowerCase();
+const DIAGNOSTIC_MODE =
+  CLI_MODE === "diagnose" ||
+  CLI_MODE === "diag" ||
+  CLI_MODE === "--diagnose" ||
+  process.env.RSS_DIAGNOSTIC_MODE === "1";
+
 if (process.env.VITEST_WORKER_ID === undefined) {
-  void main().catch((error) => {
-    console.error(`[rss] fatal startup error: ${String(error)}`);
+  const runner = DIAGNOSTIC_MODE ? runDiagnostics : main;
+  void runner().catch((error) => {
+    const label = DIAGNOSTIC_MODE ? "diagnostic" : "startup";
+    console.error(`[rss] fatal ${label} error: ${String(error)}`);
     process.exitCode = 1;
   });
 }
