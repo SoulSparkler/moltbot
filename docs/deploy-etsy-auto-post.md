@@ -18,7 +18,7 @@
 - On boot the watcher logs a build line: `[build] sha=<sha> source=<env|git> version=<semver> build_time=<iso> build_time_source=<env|startup> start_time=<iso> service=etsy-auto-post`.
 - A self-check log follows and the HTTP server exposes:
   - `GET /health` ? `{ ok: true }`
-  - `GET /self-check` ? build + config snapshot (cwd, statePath, facebook/instagram toggles, limits, image overrides, telegram polling flag).
+  - `GET /self-check` ? build + config snapshot (cwd, statePath, facebook/instagram toggles, limits, image overrides, telegram polling flag) plus Meta status: token presence, `FACEBOOK_ENABLED` reason/missing env, `META_PAGE_ID`, required vs missing permissions, page access/IG link flags.
 - To verify production is on the expected commit, check Railway logs for the `[build]` line or curl the `/self-check` endpoint.
 
 ## Runtime Env and Toggles

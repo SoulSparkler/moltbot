@@ -100,7 +100,13 @@ export function composeCaptionWithShareUrl(
   return captionText ? `${captionText}\n${shareAndSaveUrl}` : shareAndSaveUrl;
 }
 let alertsEnabledMemo: boolean | null = null;
-let facebookEnabledMemo: boolean | null = null;
+type FacebookEnablement = {
+  enabled: boolean;
+  reason?: string;
+  missingEnv?: string[];
+};
+
+let facebookEnablementMemo: FacebookEnablement | null = null;
 let instagramEnabledMemo: boolean | null = null;
 let metaPermissionsMemo: {
   ok: boolean;
@@ -780,6 +786,10 @@ async function buildCaption(params: {
 
   captionText = stripUrlsFromText(captionText) || "Listing available on Etsy.";
 
+  console.log(
+    `[caption] source=${captionSource} lang=${langDetected} translated=${translationApplied ? "yes" : "no"} length=${captionText.length}`,
+  );
+
   return { captionText, captionSource, langDetected, translationApplied };
 }
 
@@ -1024,34 +1034,61 @@ function alertsEnabled(): boolean {
   return alertsEnabledMemo;
 }
 
-function facebookEnabled(): boolean {
-  if (facebookEnabledMemo !== null) {
-    return facebookEnabledMemo;
+function resolveFacebookEnablement(): FacebookEnablement {
+  if (facebookEnablementMemo !== null) {
+    return facebookEnablementMemo;
   }
+
+  const missingEnv: string[] = [];
 
   if (!FACEBOOK_ENABLED) {
-    facebookEnabledMemo = false;
-    console.info('[rss] facebook disabled; skipping (set FACEBOOK_ENABLED="true" to enable).');
-    return facebookEnabledMemo;
-  }
-  if (!META_ACCESS_TOKEN && !META_PAGE_ACCESS_TOKEN) {
-    facebookEnabledMemo = false;
-    console.info(
-      "[rss] META_ACCESS_TOKEN and META_PAGE_ACCESS_TOKEN missing; Facebook posts disabled.",
-    );
-    return facebookEnabledMemo;
-  }
-  if (!META_PAGE_ID) {
-    facebookEnabledMemo = false;
-    console.info("[rss] META_PAGE_ID missing; Facebook posts disabled.");
-    return facebookEnabledMemo;
+    missingEnv.push("FACEBOOK_ENABLED");
+    facebookEnablementMemo = {
+      enabled: false,
+      reason: "FACEBOOK_ENABLED=false",
+      missingEnv,
+    };
+    console.info('[rss] facebook disabled; set FACEBOOK_ENABLED="true" to enable.');
+    return facebookEnablementMemo;
   }
 
-  facebookEnabledMemo = true;
+  if (!META_ACCESS_TOKEN && !META_PAGE_ACCESS_TOKEN) {
+    missingEnv.push("META_ACCESS_TOKEN", "META_PAGE_ACCESS_TOKEN");
+    facebookEnablementMemo = {
+      enabled: false,
+      reason: "meta_access_token_missing",
+      missingEnv,
+    };
+    console.info(
+      "[rss] META_ACCESS_TOKEN and/or META_PAGE_ACCESS_TOKEN missing; Facebook posts disabled.",
+    );
+    return facebookEnablementMemo;
+  }
+
+  if (!META_PAGE_ID) {
+    missingEnv.push("META_PAGE_ID");
+    facebookEnablementMemo = {
+      enabled: false,
+      reason: "meta_page_id_missing",
+      missingEnv,
+    };
+    console.info("[rss] META_PAGE_ID missing; Facebook posts disabled.");
+    return facebookEnablementMemo;
+  }
+
+  facebookEnablementMemo = {
+    enabled: true,
+    reason: "enabled",
+    missingEnv,
+  };
   console.info(
     `[rss] Facebook posts enabled. verify_attachment=${RSS_FACEBOOK_VERIFY_ATTACHMENT ? "yes" : "no"}`,
   );
-  return facebookEnabledMemo;
+  return facebookEnablementMemo;
+}
+
+function facebookEnabled(): boolean {
+  return resolveFacebookEnablement().enabled;
 }
 
 function instagramEnabled(): boolean {
@@ -1314,7 +1351,12 @@ async function postFacebookItem(params: {
   caption: CaptionBuildResult;
   image: ResolvedImage;
 }): Promise<PublishResult> {
-  if (!facebookEnabled()) {
+  const fbStatus = resolveFacebookEnablement();
+  if (!fbStatus.enabled) {
+    const missing = (fbStatus.missingEnv ?? []).join(",") || "none";
+    console.log(
+      `[publish] skipped reason=facebook_disabled missing_env=${missing} detail=${fbStatus.reason ?? "unknown"}`,
+    );
     return { attempted: false, ok: false, skippedReason: "facebook_disabled" };
   }
 
@@ -1342,6 +1384,10 @@ async function postFacebookItem(params: {
     tokenFingerprint: pageToken.fingerprint,
   });
 
+  console.log(
+    `[publish] facebook attempt listing=${params.candidate.listingId} page_id=${META_PAGE_ID} image_host=${params.image.imageHost ?? "unknown"} caption_len=${caption.length} token_source=${pageToken.source}`,
+  );
+
   try {
     const result = await postFacebookPagePhoto({
       pageId: META_PAGE_ID,
@@ -1364,6 +1410,10 @@ async function postFacebookItem(params: {
       postId: result.postId,
     });
 
+    console.log(
+      `[publish] facebook success listing=${params.candidate.listingId} photo_id=${result.photoId ?? "n/a"} post_id=${result.postId ?? "n/a"}`,
+    );
+
     return {
       attempted: true,
       ok: true,
@@ -1377,6 +1427,19 @@ async function postFacebookItem(params: {
         : ((error as { status?: number | undefined })?.status ?? null);
     const fbtraceId =
       error instanceof MetaGraphRequestError ? (error.error?.fbtraceId ?? null) : null;
+    const errorPayload =
+      error instanceof MetaGraphRequestError
+        ? JSON.stringify(error.error ?? {})
+        : (() => {
+            try {
+              return JSON.stringify(error);
+            } catch {
+              return String(error);
+            }
+          })();
+    console.log(
+      `[publish] facebook error listing=${params.candidate.listingId} status=${status ?? "unknown"} fbtrace_id=${fbtraceId ?? "none"} error=${errorPayload}`,
+    );
     logMeta("facebook_publish_failed", {
       ...logBase,
       pageId: META_PAGE_ID,
@@ -1611,6 +1674,10 @@ async function postInstagramItem(params: {
     captionPreview: params.caption.captionText.slice(0, 120),
   });
 
+  console.log(
+    `[publish] instagram attempt listing=${params.candidate.listingId} ig_id=${igId ?? "none"} image_host=${imageToUse.imageHost ?? "unknown"} caption_len=${captionForPost.length}`,
+  );
+
   try {
     const result = await publishInstagramPhoto({
       igUserId: instagramBusiness.id,
@@ -1631,6 +1698,10 @@ async function postInstagramItem(params: {
       mediaId: result.mediaId,
     });
 
+    console.log(
+      `[publish] instagram success listing=${params.candidate.listingId} media_id=${result.mediaId ?? "n/a"} creation_id=${result.creationId ?? "n/a"}`,
+    );
+
     return {
       attempted: true,
       ok: true,
@@ -1639,6 +1710,9 @@ async function postInstagramItem(params: {
       publishId: result.mediaId,
     };
   } catch (error) {
+    console.log(
+      `[publish] instagram error listing=${params.candidate.listingId} error=${String(error)}`,
+    );
     if (error instanceof MetaGraphRequestError) {
       logMeta("instagram_publish_failed", {
         listingId: params.candidate.listingId,
@@ -1898,8 +1972,12 @@ export function classifyFeedItems(params: {
 
   for (let index = 0; index < params.feedItems.length; index += 1) {
     const item = params.feedItems[index];
+    console.log(`[item] guid=${item.id || "n/a"} link=${item.link || "n/a"}`);
     const candidate = toListingCandidate(item);
     if (!candidate) {
+      console.log(
+        `[normalize] listingId=missing canonicalUrl=missing link=${item.link || "n/a"} guid=${item.id || "n/a"}`,
+      );
       decisions.push({
         index: index + 1,
         feedId: item.id,
@@ -1913,6 +1991,10 @@ export function classifyFeedItems(params: {
       });
       continue;
     }
+
+    console.log(
+      `[normalize] listingId=${candidate.listingId} canonicalUrl=${candidate.canonicalListingUrl}`,
+    );
 
     const duplicateInFeed = seenListingIds.has(candidate.listingId);
     seenListingIds.add(candidate.listingId);
@@ -1949,6 +2031,10 @@ export function classifyFeedItems(params: {
       ...(lastPostedAt ? { lastPostedAt } : {}),
     });
 
+    console.log(
+      `[dedupe] listingId=${candidate.listingId} decision=${decision} reason=${reason} last_posted_at=${lastPostedAt ?? "none"} published_at=${candidate.publishedAt ?? "unknown"}`,
+    );
+
     if (decision === "NEW") {
       eligibleCandidates.push(candidate);
     }
@@ -1969,6 +2055,7 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
 
   try {
     const items = await fetchFeed(ETSY_SHOP_RSS_URL);
+    console.log(`[rss] fetched trigger=${trigger} count=${items.length} url=${ETSY_SHOP_RSS_URL}`);
     if (items.length === 0) {
       console.log(`[rss] ${trigger}: feed returned 0 items.`);
       console.log(
@@ -2436,32 +2523,60 @@ async function main(): Promise<void> {
         return;
       }
       if (url.pathname === "/self-check") {
-        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-        res.end(
-          JSON.stringify({
-            ok: true,
-            service: SERVICE_NAME,
-            build: buildForResponse,
-            config: {
-              cwd: process.cwd(),
-              statePath: STATE_PATH,
-              stateDir: dirname(STATE_PATH),
-              rssUrl: ETSY_SHOP_RSS_URL || null,
-              rssUrlPresent: Boolean(ETSY_SHOP_RSS_URL),
-              facebookEnabled: FACEBOOK_ENABLED,
-              instagramEnabled: INSTAGRAM_ENABLED,
-              maxPostsPerDay: MAX_POSTS_PER_DAY,
-              minPostIntervalHours: MIN_POST_INTERVAL_HOURS,
-              dedupeDays: DEDUPE_DAYS,
-              ignoreDedupe: IGNORE_DEDUPE,
-              checkIntervalMs: CHECK_INTERVAL_MS,
-              telegramPollingEnabled: TELEGRAM_POLLING_ENABLED,
-              rssInstagramImageOverride: RSS_INSTAGRAM_IMAGE_URL_OVERRIDE || null,
-              rssInstagramTestImage: RSS_INSTAGRAM_TEST_IMAGE_URL || null,
-              pinterestTestMode: PINTEREST_TEST_MODE,
-            },
-          }),
-        );
+        void (async () => {
+          const metaStatus = await runMetaHealthcheck().catch((error) => ({
+            page_access_ok: false,
+            page_id_found: false,
+            ig_linked: false,
+            missing_permissions: Array.from(META_REQUIRED_PERMISSIONS),
+            error: `meta_healthcheck_failed:${String(error)}`,
+          }));
+          const fbStatus = resolveFacebookEnablement();
+          res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+          res.end(
+            JSON.stringify({
+              ok: true,
+              service: SERVICE_NAME,
+              build: buildForResponse,
+              config: {
+                cwd: process.cwd(),
+                statePath: STATE_PATH,
+                stateDir: dirname(STATE_PATH),
+                rssUrl: ETSY_SHOP_RSS_URL || null,
+                rssUrlPresent: Boolean(ETSY_SHOP_RSS_URL),
+                facebookEnabled: fbStatus.enabled,
+                facebookReason: fbStatus.reason ?? null,
+                facebookMissingEnv: fbStatus.missingEnv ?? [],
+                instagramEnabled: INSTAGRAM_ENABLED,
+                maxPostsPerDay: MAX_POSTS_PER_DAY,
+                minPostIntervalHours: MIN_POST_INTERVAL_HOURS,
+                dedupeDays: DEDUPE_DAYS,
+                ignoreDedupe: IGNORE_DEDUPE,
+                checkIntervalMs: CHECK_INTERVAL_MS,
+                telegramPollingEnabled: TELEGRAM_POLLING_ENABLED,
+                rssInstagramImageOverride: RSS_INSTAGRAM_IMAGE_URL_OVERRIDE || null,
+                rssInstagramTestImage: RSS_INSTAGRAM_TEST_IMAGE_URL || null,
+                pinterestTestMode: PINTEREST_TEST_MODE,
+              },
+              meta: {
+                accessTokenPresent: Boolean(META_ACCESS_TOKEN),
+                pageAccessTokenPresent: Boolean(META_PAGE_ACCESS_TOKEN),
+                pageId: META_PAGE_ID || null,
+                pageAccessOk: metaStatus.page_access_ok,
+                pageIdFound: metaStatus.page_id_found,
+                igLinked: metaStatus.ig_linked,
+                requiredPermissions: META_REQUIRED_PERMISSIONS,
+                missingPermissions: metaStatus.missing_permissions,
+                error: metaStatus.error ?? null,
+              },
+            }),
+          );
+        })().catch((error) => {
+          if (!res.writableEnded) {
+            res.writeHead(500, { "content-type": "application/json; charset=utf-8" });
+            res.end(JSON.stringify({ ok: false, error: String(error) }));
+          }
+        });
         return;
       }
       if (url.pathname === "/diagnostics") {

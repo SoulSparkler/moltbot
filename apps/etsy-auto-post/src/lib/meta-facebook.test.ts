@@ -48,6 +48,12 @@ describe("canonicalizeEtsyUrl", () => {
       "https://www.etsy.com/listing/4458007567/abc",
     );
   });
+
+  it("normalizes bare hosts and strips tracking params", () => {
+    expect(
+      canonicalizeEtsyUrl("http://etsy.com/nl-nl/listing/9876543210/blue-plate?utm_campaign=rss"),
+    ).toBe("https://www.etsy.com/listing/9876543210/blue-plate");
+  });
 });
 
 describe("postFacebookPageEtsyListing", () => {
