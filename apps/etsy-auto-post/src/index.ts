@@ -2513,11 +2513,6 @@ async function main(): Promise<void> {
           cwd: process.cwd(),
         } satisfies BuildInfo);
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
-      if (url.pathname === "/") {
-        res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
-        res.end("Jannetje is running.");
-        return;
-      }
       if (url.pathname === "/health") {
         res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ ok: true }));

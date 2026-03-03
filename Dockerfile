@@ -28,6 +28,7 @@ RUN OPENCLAW_A2UI_SKIP_MISSING=1 pnpm build
 # Force pnpm for UI build (Bun may fail on ARM/Synology architectures)
 ENV OPENCLAW_PREFER_PNPM=1
 RUN pnpm ui:build
+RUN pnpm --filter etsy-auto-post build
 
 ENV NODE_ENV=production
 

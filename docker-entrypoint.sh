@@ -366,6 +366,13 @@ NODE
         set -- "$@" --token "$OPENCLAW_GATEWAY_TOKEN"
     fi
 
+    # Start etsy-auto-post sidecar if the built artifact exists
+    ETSY_ENTRY="/app/apps/etsy-auto-post/dist/index.js"
+    if [ -f "$ETSY_ENTRY" ]; then
+        echo "[entrypoint] Starting etsy-auto-post sidecar (health server disabled, gateway owns PORT)"
+        RSS_DISABLE_HEALTH_SERVER=1 node "$ETSY_ENTRY" &
+    fi
+
     if [ "$(id -u)" -eq 0 ] && command -v su >/dev/null 2>&1; then
         chown -R node:node "$OPENCLAW_DATA_DIR" /app 2>/dev/null || true
         echo "[entrypoint] Exec (as node): $*"
