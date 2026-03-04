@@ -11,25 +11,35 @@ import {
 } from "./index.js";
 
 describe("canonicalizeEtsyUrl", () => {
-  it("normalizes locale-prefixed listing URLs and strips query params", () => {
+  it("normalizes locale-prefixed listing URLs to slugless shop-domain form", () => {
     expect(
       canonicalizeEtsyUrl("https://www.etsy.com/nl/listing/12345/slug-title?ref=rss&utm_source=x"),
-    ).toBe("https://www.etsy.com/listing/12345/slug-title");
+    ).toBe("https://tresortendance.etsy.com/listing/12345");
   });
 });
 
 describe("share-and-save URLs", () => {
-  it("builds Facebook share URL on the shop domain with expected UTM params", () => {
+  it("builds Facebook share URL on the shop domain, always slugless, with expected UTM params", () => {
     const url = buildShareAndSaveUrl("https://www.etsy.com/listing/12345/slug-title?ref=rss", "facebook");
     expect(url).toBe(
-      "https://tresortendance.etsy.com/listing/12345/slug-title?ref=rss&utm_source=facebook&utm_medium=organic&utm_campaign=autopost",
+      "https://tresortendance.etsy.com/listing/12345?ref=rss&utm_source=facebook&utm_medium=organic&utm_campaign=autopost",
     );
   });
 
-  it("builds Instagram share URL on the shop domain with expected UTM params", () => {
+  it("builds Instagram share URL on the shop domain, always slugless, with expected UTM params", () => {
     const url = buildShareAndSaveUrl("https://www.etsy.com/listing/12345/slug-title", "instagram");
     expect(url).toBe(
-      "https://tresortendance.etsy.com/listing/12345/slug-title?utm_source=instagram&utm_medium=organic&utm_campaign=autopost",
+      "https://tresortendance.etsy.com/listing/12345?utm_source=instagram&utm_medium=organic&utm_campaign=autopost",
+    );
+  });
+
+  it("builds Pinterest share URL on the shop domain, always slugless", () => {
+    const url = buildShareAndSaveUrl(
+      "https://www.etsy.com/nl/listing/4465924335/vintage-laguiole-snijset-foo?ref=rss",
+      "pinterest",
+    );
+    expect(url).toBe(
+      "https://tresortendance.etsy.com/listing/4465924335?ref=rss&utm_source=pinterest&utm_medium=organic&utm_campaign=autopost",
     );
   });
 

@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import {
   extractEtsyListingImageUrlFromHtml,
   extractEtsyRssImageUrl,
+  extractOgTitleFromHtml,
   toShareAndSaveUrl,
 } from "./lib/etsy.js";
 import { canonicalizeEtsyUrl, postFacebookPagePhoto } from "./lib/meta-facebook.js";
@@ -57,6 +58,8 @@ const RSS_INSTAGRAM_POLL_TIMEOUT_MS = toNumberOrUndefined(
 const RSS_INSTAGRAM_TEST_IMAGE_URL = process.env.RSS_INSTAGRAM_TEST_IMAGE_URL?.trim() ?? "";
 const PINTEREST_ACCESS_TOKEN = process.env.PINTEREST_ACCESS_TOKEN?.trim() ?? "";
 const PINTEREST_BOARD_ID = process.env.PINTEREST_BOARD_ID?.trim() ?? "";
+const PINTEREST_ENABLED_TOGGLE = resolveBooleanToggle("PINTEREST_ENABLED");
+const PINTEREST_ENABLED = PINTEREST_ENABLED_TOGGLE.enabled;
 const PINTEREST_TEST_MODE = process.env.PINTEREST_TEST_MODE === "true";
 const PINTEREST_TEST_IMAGE_URL = "https://via.placeholder.com/1000x1500.png";
 const PINTEREST_TEST_LINK = "https://tresortendance.etsy.com";
@@ -79,12 +82,13 @@ const IGNORE_DEDUPE =
   process.env.RSS_IGNORE_DEDUPE === "true" ||
   process.env.IGNORE_DEDUPE === "1" ||
   process.env.IGNORE_DEDUPE === "true";
+const POST_SPACING_SECONDS = Math.max(0, toNumberOrUndefined(process.env.POST_SPACING_SECONDS) ?? 0);
 const SHARE_AND_SAVE_MEDIUM = "organic";
 const SHARE_AND_SAVE_CAMPAIGN = "autopost";
 
 export function buildShareAndSaveUrl(
   listingUrl: string,
-  source: "facebook" | "instagram",
+  source: "facebook" | "instagram" | "pinterest",
 ): string {
   return toShareAndSaveUrl(listingUrl, {
     utm_source: source,
@@ -108,6 +112,7 @@ type FacebookEnablement = {
 
 let facebookEnablementMemo: FacebookEnablement | null = null;
 let instagramEnabledMemo: boolean | null = null;
+let pinterestEnabledMemo: boolean | null = null;
 let metaPermissionsMemo: {
   ok: boolean;
   status: number;
@@ -142,6 +147,7 @@ type WatcherState = {
   last_successful_post_at?: string;
   last_successful_fb_post_at?: string;
   last_successful_ig_post_at?: string;
+  last_successful_pin_post_at?: string;
   last_attempted_post_at?: string;
   posted_listing_ids?: Record<string, string>;
 };
@@ -685,6 +691,7 @@ type ResolvedImage = {
   imageUrl: string;
   imageSource: string;
   imageHost: string | null;
+  ogTitle?: string | null;
 };
 
 type PublishResult = {
@@ -740,11 +747,12 @@ type RunSummary = {
   inspected: number;
   newItems: number;
   selectedListingId: string | null;
+  postedCount: number;
   gate: { ok: boolean; reason?: string };
   ignoreDedupe: boolean;
   lastSuccessfulPostAt?: string;
   lastAttemptedPostAt?: string;
-  posted: { facebook: boolean; instagram: boolean };
+  posted: { facebook: boolean; instagram: boolean; pinterest: boolean };
 };
 
 function toListingCandidate(item: FeedItem): ListingCandidate | null {
@@ -773,15 +781,18 @@ function toListingCandidate(item: FeedItem): ListingCandidate | null {
 async function buildCaption(params: {
   item: FeedItem;
   canonicalListingUrl: string;
+  ogTitle?: string | null;
 }): Promise<CaptionBuildResult> {
   const title = params.item.title.trim();
   const descriptionText = stripHtmlToText(params.item.description);
-  const descriptionSnippet = truncateText(descriptionText, 200);
+  // Only strip URLs from the description, not the title — titles rarely contain URLs
+  // and stripping them was causing empty captions.
+  const descriptionSnippet = truncateText(stripUrlsFromText(descriptionText), 200);
 
   const captionCandidate =
     title && descriptionSnippet ? `${title}\n\n${descriptionSnippet}` : title || descriptionSnippet;
 
-  const captionSource = title
+  let captionSource = title
     ? descriptionSnippet
       ? "rss_title_description"
       : "rss_title"
@@ -789,7 +800,13 @@ async function buildCaption(params: {
       ? "rss_description"
       : "fallback_generic_en";
 
-  let captionText = stripUrlsFromText(captionCandidate) || "Listing available on Etsy.";
+  // Use og:title from listing HTML as fallback before the generic string
+  let captionText = captionCandidate.trim();
+  if (!captionText && params.ogTitle?.trim()) {
+    captionText = params.ogTitle.trim();
+    captionSource = "og_title";
+  }
+  captionText = captionText || "Listing available on Etsy.";
 
   const listingUrlLocale =
     extractEtsyListingLocaleFromUrl(params.item.link) ??
@@ -829,7 +846,7 @@ async function buildCaption(params: {
     }
   }
 
-  captionText = stripUrlsFromText(captionText) || "Listing available on Etsy.";
+  captionText = captionText.trim() || "Listing available on Etsy.";
 
   console.log(
     `[caption] STAGE=CAPTION_BUILD source=${captionSource} lang=${langDetected} translated=${translationApplied ? "yes" : "no"} length=${captionText.length} url_locale=${listingUrlLocale ?? "none"} openai_key_present=${OPENAI_API_KEY ? "yes" : "no"}`,
@@ -857,6 +874,7 @@ async function resolveImageForItem(params: {
       imageUrl: resolved.imageUrl,
       imageSource: resolved.imageSource,
       imageHost: urlHostOrNull(resolved.imageUrl),
+      ogTitle: resolved.ogTitle,
     };
   } catch {
     return null;
@@ -1158,6 +1176,32 @@ function instagramEnabled(): boolean {
   instagramEnabledMemo = true;
   console.info("[rss] Instagram posts enabled.");
   return instagramEnabledMemo;
+}
+
+function pinterestEnabled(): boolean {
+  if (pinterestEnabledMemo !== null) {
+    return pinterestEnabledMemo;
+  }
+
+  if (!PINTEREST_ENABLED) {
+    pinterestEnabledMemo = false;
+    console.info('[rss] pinterest disabled; skipping (set PINTEREST_ENABLED="true" to enable).');
+    return pinterestEnabledMemo;
+  }
+  if (!PINTEREST_ACCESS_TOKEN) {
+    pinterestEnabledMemo = false;
+    console.info("[rss] PINTEREST_ACCESS_TOKEN missing; Pinterest posts disabled.");
+    return pinterestEnabledMemo;
+  }
+  if (!PINTEREST_BOARD_ID) {
+    pinterestEnabledMemo = false;
+    console.info("[rss] PINTEREST_BOARD_ID missing; Pinterest posts disabled.");
+    return pinterestEnabledMemo;
+  }
+
+  pinterestEnabledMemo = true;
+  console.info("[rss] Pinterest posts enabled.");
+  return pinterestEnabledMemo;
 }
 
 function formatTokenFingerprint(token: string): string {
@@ -1638,13 +1682,15 @@ async function resolveEtsyListingImageUrl(listingUrlNormalized: string): Promise
   listingUrlNormalized: string;
   imageUrl: string;
   imageSource: "og_image" | "json_ld";
+  ogTitle: string | null;
 }> {
   const html = await fetchEtsyListingHtml({ listingUrlNormalized });
   const extracted = extractEtsyListingImageUrlFromHtml(html);
+  const ogTitle = extractOgTitleFromHtml(html);
   if (!extracted?.url) {
     throw new Error("ETSY_IMAGE_URL_MISSING: unable to extract og:image or JSON-LD image.");
   }
-  return { listingUrlNormalized, imageUrl: extracted.url, imageSource: extracted.source };
+  return { listingUrlNormalized, imageUrl: extracted.url, imageSource: extracted.source, ogTitle };
 }
 
 async function postInstagramItem(params: {
@@ -1691,7 +1737,11 @@ async function postInstagramItem(params: {
   }
 
   const shareAndSaveUrl = buildShareAndSaveUrl(params.candidate.canonicalListingUrl, "instagram");
-  const captionForPost = composeCaptionWithShareUrl(params.caption.captionText, shareAndSaveUrl);
+  // Instagram: no raw URLs in caption (not clickable); use hashtags instead
+  const igHashtags = "#vintage #antique #etsy #etsyfinds #vintageshop";
+  const captionForPost = params.caption.captionText
+    ? `${params.caption.captionText}\n\n${igHashtags}`
+    : igHashtags;
 
   logMeta("instagram_publish_attempt", {
     listingId: params.candidate.listingId,
@@ -1970,6 +2020,76 @@ async function createTestPinterestPin(): Promise<PinterestTestResult> {
   };
 }
 
+async function postPinterestItem(params: {
+  candidate: ListingCandidate;
+  caption: CaptionBuildResult;
+  image: ResolvedImage | null;
+}): Promise<PublishResult & { pinId: string | null }> {
+  if (!pinterestEnabled()) {
+    return { ok: true, attempted: false, pinId: null, skippedReason: "pinterest_disabled" };
+  }
+
+  if (!params.image) {
+    console.log(
+      `[publish] pinterest skipped listing=${params.candidate.listingId} reason=image_missing`,
+    );
+    return { ok: false, attempted: false, pinId: null, skippedReason: "image_missing" };
+  }
+
+  const shareAndSaveUrl = buildShareAndSaveUrl(params.candidate.canonicalListingUrl, "pinterest");
+  const title = params.caption.captionText.split("\n")[0]?.slice(0, 100) || "Antique & Vintage Find";
+  const description = params.caption.captionText || "Vintage treasure from our Etsy shop.";
+
+  console.log(
+    `[rss] STAGE=POST_PINTEREST attempt listing=${params.candidate.listingId} board_id=${PINTEREST_BOARD_ID} image_host=${params.image.imageHost ?? "unknown"} title_len=${title.length}`,
+  );
+
+  const payload = {
+    board_id: PINTEREST_BOARD_ID,
+    title,
+    description,
+    link: shareAndSaveUrl,
+    media_source: {
+      source_type: "image_url" as const,
+      url: params.image.imageUrl,
+    },
+  };
+
+  try {
+    const response = await fetch("https://api.pinterest.com/v5/pins", {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+        authorization: `Bearer ${PINTEREST_ACCESS_TOKEN}`,
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const responseText = await response.text();
+    const parsedBody = responseText ? safeJsonParse(responseText) : null;
+
+    if (response.ok) {
+      const pinId = extractStringField(parsedBody, ["id", "pin_id"]);
+      console.log(
+        `[publish] pinterest success listing=${params.candidate.listingId} pin_id=${pinId ?? "unknown"} status=${response.status}`,
+      );
+      return { attempted: true, ok: true, pinId: pinId ?? null };
+    }
+
+    const bodyForLog = parsedBody ?? (responseText || "empty");
+    console.log(
+      `[publish] pinterest error listing=${params.candidate.listingId} status=${response.status} body=${formatBodyForLog(bodyForLog)}`,
+    );
+    return { attempted: true, ok: false, pinId: null, status: response.status };
+  } catch (error) {
+    console.log(
+      `[publish] pinterest error listing=${params.candidate.listingId} error=${String(error)}`,
+    );
+    return { attempted: true, ok: false, pinId: null, error };
+  }
+}
+
 async function fetchFeed(url: string): Promise<FeedItem[]> {
   console.log(`[rss] STAGE=RSS_FETCH url=${url}`);
   const response = await fetch(url, {
@@ -2125,7 +2245,8 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
         ignoreDedupe: IGNORE_DEDUPE,
         lastSuccessfulPostAt: currentState.last_successful_post_at,
         lastAttemptedPostAt: currentState.last_attempted_post_at,
-        posted: { facebook: false, instagram: false },
+        postedCount: 0,
+        posted: { facebook: false, instagram: false, pinterest: false },
       };
       return;
     }
@@ -2136,15 +2257,22 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
     }
 
     const nowMs = Date.now();
+    const todayCount = Object.values(currentState.posted_listing_ids ?? {}).filter((iso) => {
+      const parsed = parseIsoTimestampMs(iso);
+      return parsed != null && nowMs - parsed < 24 * 60 * 60 * 1000;
+    }).length;
     const gate = shouldPostNow(currentState, nowMs);
     if (!gate.ok) {
       logMeta("skipped_due_to_daily_limit", {
         reason: gate.reason,
         last_successful_post_at: currentState.last_successful_post_at ?? null,
         last_attempted_post_at: currentState.last_attempted_post_at ?? null,
+        max_posts_per_day: MAX_POSTS_PER_DAY,
+        min_post_interval_hours: MIN_POST_INTERVAL_HOURS,
+        today_count: todayCount,
       });
       console.log(
-        `[rss] STAGE=GATE_CHECK result=BLOCKED reason=${gate.reason ?? "unknown"} last_successful_post_at=${currentState.last_successful_post_at ?? "never"} last_attempted_post_at=${currentState.last_attempted_post_at ?? "never"} fetched=${items.length} — feed has items but gate prevented processing`,
+        `[rss] STAGE=GATE_CHECK result=BLOCKED reason=${gate.reason ?? "unknown"} max_posts_per_day=${MAX_POSTS_PER_DAY} min_post_interval_hours=${MIN_POST_INTERVAL_HOURS} today_count=${todayCount} last_successful_post_at=${currentState.last_successful_post_at ?? "never"} last_attempted_post_at=${currentState.last_attempted_post_at ?? "never"} fetched=${items.length} — BLOCKED — no items processed`,
       );
       console.log(
         `[rss][metrics] trigger=${trigger} fetched=${items.length} inspected=0 new=0 skipped_dedupe=0 skipped_feed_dup=0 skipped_missing_id=0 gate_reason=${gate.reason ?? "unknown"} ignore_dedupe=${IGNORE_DEDUPE}`,
@@ -2160,7 +2288,8 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
         ignoreDedupe: IGNORE_DEDUPE,
         lastSuccessfulPostAt: currentState.last_successful_post_at,
         lastAttemptedPostAt: currentState.last_attempted_post_at,
-        posted: { facebook: false, instagram: false },
+        postedCount: 0,
+        posted: { facebook: false, instagram: false, pinterest: false },
       };
       return;
     }
@@ -2212,7 +2341,8 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
         ignoreDedupe: IGNORE_DEDUPE,
         lastSuccessfulPostAt: currentState.last_successful_post_at,
         lastAttemptedPostAt: currentState.last_attempted_post_at,
-        posted: { facebook: false, instagram: false },
+        postedCount: 0,
+        posted: { facebook: false, instagram: false, pinterest: false },
       };
       return;
     }
@@ -2226,97 +2356,144 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
       return a.listingId.localeCompare(b.listingId);
     });
 
-    const selected = eligible[0];
-    logMeta("candidate_selected", {
-      listingId: selected.listingId,
-      canonicalListingUrl: selected.canonicalListingUrl,
-      publishedAt: selected.publishedAt ?? null,
-      ignore_dedupe: IGNORE_DEDUPE,
-    });
+    // Post multiple items up to remaining daily quota
+    const remainingQuota = Math.max(0, MAX_POSTS_PER_DAY - todayCount);
+    const toPost = eligible.slice(0, remainingQuota);
+    let postedCount = 0;
+    let lastFbSuccess = false;
+    let lastIgSuccess = false;
+    let lastPinSuccess = false;
+    let lastSelectedId: string | null = null;
 
-    const caption = await buildCaption({
-      item: selected,
-      canonicalListingUrl: selected.canonicalListingUrl,
-    });
-    const image = await resolveImageForItem({
-      item: selected,
-      canonicalListingUrl: selected.canonicalListingUrl,
-    });
+    console.log(
+      `[rss] STAGE=BATCH_POST eligible=${eligible.length} remaining_quota=${remainingQuota} to_post=${toPost.length} post_spacing_seconds=${POST_SPACING_SECONDS}`,
+    );
 
-    if (!image) {
-      logMeta("publish_skipped", {
+    for (let i = 0; i < toPost.length; i += 1) {
+      const selected = toPost[i];
+      lastSelectedId = selected.listingId;
+
+      // Spacing between posts (skip for first item)
+      if (i > 0 && POST_SPACING_SECONDS > 0) {
+        console.log(
+          `[rss] spacing delay=${POST_SPACING_SECONDS}s before posting item ${i + 1}/${toPost.length}`,
+        );
+        await new Promise<void>((resolve) =>
+          setTimeout(resolve, POST_SPACING_SECONDS * 1000),
+        );
+      }
+
+      logMeta("candidate_selected", {
         listingId: selected.listingId,
         canonicalListingUrl: selected.canonicalListingUrl,
-        reason: "image_missing",
+        publishedAt: selected.publishedAt ?? null,
+        ignore_dedupe: IGNORE_DEDUPE,
+        batch_index: i + 1,
+        batch_total: toPost.length,
       });
-      return;
-    }
 
-    const fbResult = await postFacebookItem({ candidate: selected, caption, image });
-    const igResult = await postInstagramItem({ candidate: selected, caption, image });
+      const image = await resolveImageForItem({
+        item: selected,
+        canonicalListingUrl: selected.canonicalListingUrl,
+      });
 
-    const attemptedAny = fbResult.attempted || igResult.attempted;
-    if (attemptedAny) {
-      currentState.last_attempted_post_at = new Date(nowMs).toISOString();
-    }
+      const caption = await buildCaption({
+        item: selected,
+        canonicalListingUrl: selected.canonicalListingUrl,
+        ogTitle: image?.ogTitle,
+      });
 
-    const fbSuccess =
-      fbResult.ok && fbResult.attempted && Boolean(fbResult.postId || fbResult.photoId);
-    const igSuccess =
-      igResult.ok &&
-      igResult.attempted &&
-      Boolean(igResult.publishId || igResult.creationId || igResult.postId);
-    const anySuccess = fbSuccess || igSuccess;
+      if (!image) {
+        logMeta("publish_skipped", {
+          listingId: selected.listingId,
+          canonicalListingUrl: selected.canonicalListingUrl,
+          reason: "image_missing",
+        });
+        continue;
+      }
 
-    if (igResult.attempted && !igResult.ok) {
-      currentState.igFailedIds = [
-        selected.listingId,
-        ...(currentState.igFailedIds ?? []).filter((entry) => entry !== selected.listingId),
-      ].slice(0, MAX_SEEN_IDS);
-    } else if (igResult.attempted) {
-      currentState.igFailedIds = (currentState.igFailedIds ?? []).filter(
-        (entry) => entry !== selected.listingId,
+      const fbResult = await postFacebookItem({ candidate: selected, caption, image });
+      const igResult = await postInstagramItem({ candidate: selected, caption, image });
+      const pinResult = await postPinterestItem({ candidate: selected, caption, image });
+
+      const attemptedAny = fbResult.attempted || igResult.attempted || pinResult.attempted;
+      if (attemptedAny) {
+        currentState.last_attempted_post_at = new Date(nowMs).toISOString();
+      }
+
+      const fbSuccess =
+        fbResult.ok && fbResult.attempted && Boolean(fbResult.postId || fbResult.photoId);
+      const igSuccess =
+        igResult.ok &&
+        igResult.attempted &&
+        Boolean(igResult.publishId || igResult.creationId || igResult.postId);
+      const pinSuccess = pinResult.ok && pinResult.attempted && Boolean(pinResult.pinId);
+      const anySuccess = fbSuccess || igSuccess || pinSuccess;
+
+      if (igResult.attempted && !igResult.ok) {
+        currentState.igFailedIds = [
+          selected.listingId,
+          ...(currentState.igFailedIds ?? []).filter((entry) => entry !== selected.listingId),
+        ].slice(0, MAX_SEEN_IDS);
+      } else if (igResult.attempted) {
+        currentState.igFailedIds = (currentState.igFailedIds ?? []).filter(
+          (entry) => entry !== selected.listingId,
+        );
+      }
+
+      if (anySuccess) {
+        const postedAtIso = new Date(nowMs).toISOString();
+        recordPostedItem(currentState, { itemId: selected.listingId, postedAtIso });
+        currentState.posted_listing_ids = {
+          [selected.listingId]: postedAtIso,
+          ...currentState.posted_listing_ids,
+        };
+        currentState.last_successful_post_at = postedAtIso;
+        if (fbSuccess) {
+          currentState.last_successful_fb_post_at = postedAtIso;
+        }
+        if (igSuccess) {
+          currentState.last_successful_ig_post_at = postedAtIso;
+        }
+        if (pinSuccess) {
+          currentState.last_successful_pin_post_at = postedAtIso;
+        }
+        currentState.last_rotation_at = postedAtIso;
+        postedCount += 1;
+        logMeta("publish_complete", {
+          listingId: selected.listingId,
+          canonicalListingUrl: selected.canonicalListingUrl,
+          fb_success: fbSuccess,
+          ig_success: igSuccess,
+          pin_success: pinSuccess,
+        });
+      } else {
+        logMeta("publish_failed", {
+          listingId: selected.listingId,
+          canonicalListingUrl: selected.canonicalListingUrl,
+          fb_attempted: fbResult.attempted,
+          ig_attempted: igResult.attempted,
+          pin_attempted: pinResult.attempted,
+        });
+      }
+
+      lastFbSuccess = fbSuccess;
+      lastIgSuccess = igSuccess;
+      lastPinSuccess = pinSuccess;
+
+      console.log(
+        `[rss][metrics] batch_item=${i + 1}/${toPost.length} posted_fb=${fbSuccess ? 1 : 0} posted_ig=${igSuccess ? 1 : 0} posted_pin=${pinSuccess ? 1 : 0} attempted_fb=${fbResult.attempted ? 1 : 0} attempted_ig=${igResult.attempted ? 1 : 0} attempted_pin=${pinResult.attempted ? 1 : 0} ignore_dedupe=${IGNORE_DEDUPE}`,
       );
-    }
 
-    if (anySuccess) {
-      const postedAtIso = new Date(nowMs).toISOString();
-      recordPostedItem(currentState, { itemId: selected.listingId, postedAtIso });
-      currentState.posted_listing_ids = {
-        [selected.listingId]: postedAtIso,
-        ...currentState.posted_listing_ids,
-      };
-      currentState.last_successful_post_at = postedAtIso;
-      if (fbSuccess) {
-        currentState.last_successful_fb_post_at = postedAtIso;
-      }
-      if (igSuccess) {
-        currentState.last_successful_ig_post_at = postedAtIso;
-      }
-      currentState.last_rotation_at = postedAtIso;
-      logMeta("publish_complete", {
-        listingId: selected.listingId,
-        canonicalListingUrl: selected.canonicalListingUrl,
-        fb_success: fbSuccess,
-        ig_success: igSuccess,
-      });
-    } else {
-      logMeta("publish_failed", {
-        listingId: selected.listingId,
-        canonicalListingUrl: selected.canonicalListingUrl,
-        fb_attempted: fbResult.attempted,
-        ig_attempted: igResult.attempted,
-      });
+      currentState.seenIds = Array.from(
+        new Set([selected.id, ...currentState.seenIds].filter(Boolean)),
+      ).slice(0, MAX_SEEN_IDS);
+      await saveState(currentState);
     }
 
     console.log(
-      `[rss][metrics] posted_fb=${fbSuccess ? 1 : 0} posted_ig=${igSuccess ? 1 : 0} attempted_fb=${fbResult.attempted ? 1 : 0} attempted_ig=${igResult.attempted ? 1 : 0} ignore_dedupe=${IGNORE_DEDUPE}`,
+      `[rss][metrics] batch_complete posted_count=${postedCount} eligible=${eligible.length} to_post=${toPost.length}`,
     );
-
-    currentState.seenIds = Array.from(
-      new Set([selected.id, ...currentState.seenIds].filter(Boolean)),
-    ).slice(0, MAX_SEEN_IDS);
-    await saveState(currentState);
 
     lastRunSummary = {
       at: nowMs,
@@ -2324,12 +2501,13 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
       fetched: items.length,
       inspected: decisions.length,
       newItems: eligible.length,
-      selectedListingId: selected.listingId,
+      selectedListingId: lastSelectedId,
+      postedCount,
       gate,
       ignoreDedupe: IGNORE_DEDUPE,
       lastSuccessfulPostAt: currentState.last_successful_post_at,
       lastAttemptedPostAt: currentState.last_attempted_post_at,
-      posted: { facebook: fbSuccess, instagram: igSuccess },
+      posted: { facebook: lastFbSuccess, instagram: lastIgSuccess, pinterest: lastPinSuccess },
     };
   } catch (error) {
     console.log(`[rss] ${trigger} check failed: ${String(error)}`);

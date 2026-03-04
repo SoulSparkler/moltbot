@@ -111,11 +111,12 @@ export function canonicalizeEtsyListingUrl(raw: string): string {
   const listingId = match[1];
   const slug = match[2]?.trim();
 
+  // Always slugless: https://www.etsy.com/listing/<id> — no locale prefix, no slug, no query/hash.
   parsed.protocol = "https:";
   parsed.username = "";
   parsed.password = "";
   parsed.hostname = "www.etsy.com";
-  parsed.pathname = slug ? `/listing/${listingId}/${slug}` : `/listing/${listingId}`;
+  parsed.pathname = `/listing/${listingId}`;
   parsed.search = "";
   parsed.hash = "";
 
@@ -125,13 +126,17 @@ export function canonicalizeEtsyListingUrl(raw: string): string {
 export function canonicalizeEtsyUrl(raw: string): string {
   const canonical = canonicalizeEtsyListingUrl(raw);
 
-  // Last-mile canonicalization: some feeds include locale-prefixed paths like `/nl/listing/...`.
-  // Ensure the final URL is always `https://www.etsy.com/listing/...` with no query/hash.
-  const normalized = canonical
-    .replace(/^https:\/\/www\.etsy\.com\/[a-z]{2}\/listing\//i, "https://www.etsy.com/listing/")
-    .replace(/^http:\/\/www\.etsy\.com\/listing\//i, "https://www.etsy.com/listing/");
+  // Rewrite to shop subdomain for Share & Save payback, slugless.
+  const shopDomain = (process.env.ETSY_SHARE_AND_SAVE_DOMAIN ?? "tresortendance.etsy.com")
+    .trim()
+    .replace(/^https?:\/\//i, "")
+    .replace(/\/+$/, "");
 
-  return normalized;
+  if (!shopDomain) {
+    return canonical;
+  }
+
+  return canonical.replace(/^https:\/\/www\.etsy\.com\/listing\//i, `https://${shopDomain}/listing/`);
 }
 
 function normalizeGraphHttpUrl(raw: string, label: string): string {

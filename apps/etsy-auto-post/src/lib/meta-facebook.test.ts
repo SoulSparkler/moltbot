@@ -7,20 +7,20 @@ import {
 } from "./meta-facebook.js";
 
 describe("canonicalizeEtsyListingUrl", () => {
-  it("normalizes Etsy listing URLs and strips query/hash", () => {
+  it("normalizes Etsy listing URLs to slugless www.etsy.com form", () => {
     expect(
       canonicalizeEtsyListingUrl(
         "https://www.etsy.com/listing/1234567890/vintage-vase?utm_source=x&ref=y#reviews",
       ),
-    ).toBe("https://www.etsy.com/listing/1234567890/vintage-vase");
+    ).toBe("https://www.etsy.com/listing/1234567890");
   });
 
-  it("accepts locale-prefixed listing URLs", () => {
+  it("accepts locale-prefixed listing URLs and strips locale + slug", () => {
     expect(
       canonicalizeEtsyListingUrl(
         "https://www.etsy.com/en-gb/listing/1234567890/vintage-vase?utm_source=x#reviews",
       ),
-    ).toBe("https://www.etsy.com/listing/1234567890/vintage-vase");
+    ).toBe("https://www.etsy.com/listing/1234567890");
   });
 
   it("rejects shortened etsy.me URLs", () => {
@@ -37,22 +37,38 @@ describe("canonicalizeEtsyListingUrl", () => {
 });
 
 describe("canonicalizeEtsyUrl", () => {
-  it("strips locale prefixes and query params", () => {
+  it("produces slugless tresortendance.etsy.com URLs from /nl/ RSS links", () => {
+    expect(
+      canonicalizeEtsyUrl(
+        "https://www.etsy.com/nl/listing/4465924335/vintage-laguiole-snijset-foo?ref=rss",
+      ),
+    ).toBe("https://tresortendance.etsy.com/listing/4465924335");
+  });
+
+  it("produces slugless tresortendance.etsy.com from shop-domain input", () => {
+    expect(
+      canonicalizeEtsyUrl(
+        "https://tresortendance.etsy.com/nl/listing/4465924335/vintage-laguiole-snijset-foo",
+      ),
+    ).toBe("https://tresortendance.etsy.com/listing/4465924335");
+  });
+
+  it("strips locale prefixes, slug, and query params", () => {
     expect(
       canonicalizeEtsyUrl(
         "https://www.etsy.com/nl/listing/1234567890/vintage-vase?utm_source=x&ref=y#reviews",
       ),
-    ).toBe("https://www.etsy.com/listing/1234567890/vintage-vase");
+    ).toBe("https://tresortendance.etsy.com/listing/1234567890");
 
     expect(canonicalizeEtsyUrl("https://www.etsy.com/nl/listing/4458007567/abc?ref=rss")).toBe(
-      "https://www.etsy.com/listing/4458007567/abc",
+      "https://tresortendance.etsy.com/listing/4458007567",
     );
   });
 
   it("normalizes bare hosts and strips tracking params", () => {
     expect(
       canonicalizeEtsyUrl("http://etsy.com/nl-nl/listing/9876543210/blue-plate?utm_campaign=rss"),
-    ).toBe("https://www.etsy.com/listing/9876543210/blue-plate");
+    ).toBe("https://tresortendance.etsy.com/listing/9876543210");
   });
 });
 
@@ -76,7 +92,7 @@ describe("postFacebookPageEtsyListing", () => {
     expect(result.postId).toBe("123_456");
     expect(result.message).toBe("Beautiful vintage piece");
     expect(result.link).toBe(
-      "https://tresortendance.etsy.com/listing/1234567890/vintage-vase?utm_source=facebook&utm_medium=organic&utm_campaign=autopost",
+      "https://tresortendance.etsy.com/listing/1234567890?utm_source=facebook&utm_medium=organic&utm_campaign=autopost",
     );
 
     const [requestUrl, requestInit] = fetchMock.mock.calls[0] ?? [];
@@ -93,7 +109,7 @@ describe("postFacebookPageEtsyListing", () => {
 
     const body = requestInit?.body as URLSearchParams;
     expect(body.toString()).toContain(
-      "link=https%3A%2F%2Ftresortendance.etsy.com%2Flisting%2F1234567890%2Fvintage-vase%3Futm_source%3Dfacebook%26utm_medium%3Dorganic%26utm_campaign%3Dautopost",
+      "link=https%3A%2F%2Ftresortendance.etsy.com%2Flisting%2F1234567890%3Futm_source%3Dfacebook%26utm_medium%3Dorganic%26utm_campaign%3Dautopost",
     );
     expect(body.toString()).toContain("message=Beautiful+vintage+piece");
     expect(body.toString()).not.toContain("ref%3D");

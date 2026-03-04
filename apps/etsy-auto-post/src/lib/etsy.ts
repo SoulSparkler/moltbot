@@ -83,6 +83,21 @@ function normalizeHttpUrl(raw: string | null): string | null {
   return trimmed;
 }
 
+export function extractOgTitleFromHtml(html: string): string | null {
+  const tags = html.match(/<meta\b[^>]*>/gi) ?? [];
+  for (const tag of tags) {
+    const property = getHtmlAttribute(tag, "property")?.toLowerCase();
+    if (property !== "og:title") {
+      continue;
+    }
+    const content = getHtmlAttribute(tag, "content");
+    if (content) {
+      return content;
+    }
+  }
+  return null;
+}
+
 function extractOgImageUrlFromHtml(html: string): string | null {
   const tags = html.match(/<meta\b[^>]*>/gi) ?? [];
   for (const tag of tags) {
@@ -261,9 +276,9 @@ export function toShareAndSaveUrl(
       return originalUrl;
     }
 
-    const [, listingId, slug] = match;
+    const [, listingId] = match;
     const rewritten = new URL(
-      `https://${shopDomain}/listing/${listingId}${slug ? `/${slug}` : ""}`,
+      `https://${shopDomain}/listing/${listingId}`,
     );
 
     url.searchParams.forEach((value, key) => {
