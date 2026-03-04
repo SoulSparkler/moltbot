@@ -209,7 +209,7 @@ describe("shouldPostNow", () => {
     expect(result.reason).toBe("min_interval");
   });
 
-  it("blocks when a recent attempt happened even without a recorded success", () => {
+  it("allows posting when only a recent attempt (no success) is recorded", () => {
     const state = {
       seenIds: [],
       initialized: true,
@@ -217,9 +217,9 @@ describe("shouldPostNow", () => {
       last_attempted_post_at: new Date(nowMs - 2 * 60 * 60 * 1000).toISOString(),
     };
 
+    // Failed attempts should NOT block the gate — only successful posts should.
     const result = shouldPostNow(state, nowMs, { minPostIntervalMs: 24 * 60 * 60 * 1000 });
-    expect(result.ok).toBe(false);
-    expect(result.reason).toBe("min_interval");
+    expect(result.ok).toBe(true);
   });
 });
 

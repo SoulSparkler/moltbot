@@ -432,14 +432,52 @@ function decodeXmlEntities(raw: string): string {
     });
 }
 
-const DUTCH_CAPTION_PATTERNS: RegExp[] = [
-  /\b(de|het|een|en|van|met|voor|door|uit|bij|als|op|te|niet|wel|maar|ook|nog|naar|om|dat|die|dit|deze|zijn|haar|mijn|jouw|onze|jullie)\b/i,
-  /\b(maat|kleur|staat|verzending|kosten|kijk|beschrijving)\b/i,
-  /\b(glazen|vaas|vazen|schaal|schalen|bord|borden|kopje|kopjes|schotel|schoteltje|servies|porselein|kristal|kristallen|antiek|handgemaakt|handbeschilderd)\b/i,
-  /\b(italiaanse|franse|keramische|dessertglazen|aardewerk|beeldje|zeldzaam|prachtig|mooi)\b/i,
-  /\b(vintage)\s+(italiaanse|franse|keramische|dessertglazen|aardewerk|beeldje|set|middel|zeldzaam|mooi)\b/i,
-  /ij/i, // catches lots of Dutch words containing "ij"
-];
+// Dutch detection: require at least 2 distinct Dutch-specific indicators to reduce
+// false positives on English text. Single common short words (de, en, van, op, te)
+// also appear in English — so only longer / unambiguous Dutch words trigger solo.
+const DUTCH_STRONG_WORDS =
+  /\b(het|een|voor|niet|maar|ook|nog|naar|deze|zijn|haar|mijn|jouw|onze|jullie|bij|wel|uit|dit|dat|die)\b/i;
+const DUTCH_WEAK_WORDS = /\b(de|en|van|met|door|als|op|te|om)\b/i;
+const DUTCH_DOMAIN_WORDS =
+  /\b(maat|kleur|staat|verzending|kosten|kijk|beschrijving|glazen|vaas|vazen|schaal|schalen|bord|borden|kopje|kopjes|schotel|schoteltje|servies|porselein|kristal|kristallen|antiek|handgemaakt|handbeschilderd|italiaanse|franse|keramische|dessertglazen|aardewerk|beeldje|zeldzaam|prachtig|mooi)\b/i;
+const DUTCH_IJ_WORDS =
+  /\b\w*ij\w*\b/i; // only match whole words containing "ij", not substring of URLs etc.
+const DUTCH_BIGRAM =
+  /\b(vintage)\s+(italiaanse|franse|keramische|dessertglazen|aardewerk|beeldje|set|middel|zeldzaam|mooi)\b/i;
+
+function isDutchText(text: string): boolean {
+  const trimmed = (text || "").trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  // Domain-specific or bigram matches are strong enough on their own.
+  if (DUTCH_DOMAIN_WORDS.test(trimmed) || DUTCH_BIGRAM.test(trimmed)) {
+    return true;
+  }
+
+  // Require at least one strong Dutch word, or two weak words, to avoid
+  // false-triggering on English titles that happen to contain "de" or "en".
+  if (DUTCH_STRONG_WORDS.test(trimmed)) {
+    return true;
+  }
+
+  // Count distinct weak word matches — require >= 2.
+  const weakMatches = new Set<string>();
+  for (const m of trimmed.matchAll(new RegExp(DUTCH_WEAK_WORDS.source, "gi"))) {
+    weakMatches.add(m[0].toLowerCase());
+  }
+  if (weakMatches.size >= 2) {
+    return true;
+  }
+
+  // "ij"-containing whole words only count when combined with a weak word.
+  if (DUTCH_IJ_WORDS.test(trimmed) && weakMatches.size >= 1) {
+    return true;
+  }
+
+  return false;
+}
 
 function stripHtmlToText(raw: string | undefined): string {
   const input = typeof raw === "string" ? raw.trim() : "";
@@ -497,18 +535,7 @@ function truncateText(input: string, maxLength: number): string {
 }
 
 function detectCaptionLanguage(text: string): "en" | "nl" {
-  const trimmed = (text || "").trim();
-  if (!trimmed) {
-    return "en";
-  }
-
-  for (const pattern of DUTCH_CAPTION_PATTERNS) {
-    if (pattern.test(trimmed)) {
-      return "nl";
-    }
-  }
-
-  return "en";
+  return isDutchText(text) ? "nl" : "en";
 }
 
 function extractEtsyListingLocaleFromUrl(raw: string): string | null {
@@ -769,25 +796,43 @@ async function buildCaption(params: {
     extractEtsyListingLocaleFromUrl(params.item.id);
 
   let langDetected = detectCaptionLanguage(captionText);
+  // URL locale (/nl/) is no longer enough on its own to force Dutch — Etsy serves
+  // /nl/ URLs to NL-based shops even for English listings.  Only upgrade to "nl"
+  // when the text has at least one weak Dutch signal (a single weak word).
   if (langDetected === "en" && listingUrlLocale === "nl") {
-    langDetected = "nl";
+    if (DUTCH_WEAK_WORDS.test(captionText)) {
+      langDetected = "nl";
+    }
+    console.log(
+      `[caption] url_locale=nl text_lang=${langDetected} — URL locale override ${langDetected === "nl" ? "applied" : "skipped (no Dutch words in text)"}`,
+    );
   }
 
   let translationApplied = false;
   if (langDetected !== "en") {
-    const translated = await translateTextToEnglish({ text: captionText });
-    if (translated) {
-      captionText = translated;
-      translationApplied = true;
+    if (!OPENAI_API_KEY) {
+      console.log(
+        `[caption] STAGE=CAPTION_BUILD WARNING: OPENAI_API_KEY missing — cannot translate, keeping original caption instead of falling back to generic`,
+      );
+      // Keep the original caption rather than replacing with a meaningless generic.
     } else {
-      captionText = "Listing available on Etsy.";
+      const translated = await translateTextToEnglish({ text: captionText });
+      if (translated) {
+        captionText = translated;
+        translationApplied = true;
+      } else {
+        console.log(
+          `[caption] STAGE=CAPTION_BUILD WARNING: translation returned null — keeping original caption`,
+        );
+        // Keep original caption; only fall back to generic if the text itself is empty.
+      }
     }
   }
 
   captionText = stripUrlsFromText(captionText) || "Listing available on Etsy.";
 
   console.log(
-    `[caption] source=${captionSource} lang=${langDetected} translated=${translationApplied ? "yes" : "no"} length=${captionText.length}`,
+    `[caption] STAGE=CAPTION_BUILD source=${captionSource} lang=${langDetected} translated=${translationApplied ? "yes" : "no"} length=${captionText.length} url_locale=${listingUrlLocale ?? "none"} openai_key_present=${OPENAI_API_KEY ? "yes" : "no"}`,
   );
 
   return { captionText, captionSource, langDetected, translationApplied };
@@ -1182,7 +1227,6 @@ export function shouldPostNow(
   const maxPerDay = Math.max(1, config?.maxPostsPerDay ?? MAX_POSTS_PER_DAY);
   const minIntervalMs = Math.max(0, config?.minPostIntervalMs ?? MIN_POST_INTERVAL_MS);
   const lastSuccessMs = parseIsoTimestampMs(state.last_successful_post_at);
-  const lastAttemptMs = parseIsoTimestampMs(state.last_attempted_post_at);
   const postsInWindow = Object.values(state.posted_listing_ids ?? {}).filter((iso) => {
     const parsed = parseIsoTimestampMs(iso);
     return parsed != null && nowMs - parsed < 24 * 60 * 60 * 1000;
@@ -1192,12 +1236,8 @@ export function shouldPostNow(
     return { ok: false, reason: "daily_limit" };
   }
 
-  const latestAttemptMs =
-    lastSuccessMs != null && lastAttemptMs != null
-      ? Math.max(lastSuccessMs, lastAttemptMs)
-      : (lastSuccessMs ?? lastAttemptMs);
-
-  if (latestAttemptMs != null && nowMs - latestAttemptMs < minIntervalMs) {
+  // Only gate on successful posts — failed attempts should not block retries.
+  if (lastSuccessMs != null && nowMs - lastSuccessMs < minIntervalMs) {
     return { ok: false, reason: "min_interval" };
   }
 
@@ -1381,7 +1421,7 @@ async function postFacebookItem(params: {
   });
 
   console.log(
-    `[publish] facebook attempt listing=${params.candidate.listingId} page_id=${META_PAGE_ID} image_host=${params.image.imageHost ?? "unknown"} caption_len=${caption.length} token_source=${pageToken.source}`,
+    `[rss] STAGE=POST_FACEBOOK attempt listing=${params.candidate.listingId} page_id=${META_PAGE_ID} image_host=${params.image.imageHost ?? "unknown"} caption_len=${caption.length} token_source=${pageToken.source} shareUrl=${shareAndSaveUrl}`,
   );
 
   try {
@@ -1671,7 +1711,7 @@ async function postInstagramItem(params: {
   });
 
   console.log(
-    `[publish] instagram attempt listing=${params.candidate.listingId} ig_id=${igId ?? "none"} image_host=${imageToUse.imageHost ?? "unknown"} caption_len=${captionForPost.length}`,
+    `[rss] STAGE=POST_INSTAGRAM attempt listing=${params.candidate.listingId} ig_id=${igId ?? "none"} image_host=${imageToUse.imageHost ?? "unknown"} caption_len=${captionForPost.length} shareUrl=${shareAndSaveUrl}`,
   );
 
   try {
@@ -1931,16 +1971,33 @@ async function createTestPinterestPin(): Promise<PinterestTestResult> {
 }
 
 async function fetchFeed(url: string): Promise<FeedItem[]> {
+  console.log(`[rss] STAGE=RSS_FETCH url=${url}`);
   const response = await fetch(url, {
     headers: {
       accept: "application/rss+xml, application/xml, text/xml, */*",
     },
   });
+  const contentLength = response.headers.get("content-length") ?? "unknown";
+  const etag = response.headers.get("etag") ?? "none";
+  const cacheControl = response.headers.get("cache-control") ?? "none";
+  console.log(
+    `[rss] STAGE=RSS_FETCH status=${response.status} content_length=${contentLength} etag=${etag} cache_control=${cacheControl}`,
+  );
   if (!response.ok) {
     throw new Error(`Feed request failed (HTTP ${response.status})`);
   }
   const xml = await response.text();
-  return parseFeedItems(xml);
+  const items = parseFeedItems(xml);
+  console.log(`[rss] STAGE=RSS_PARSE item_count=${items.length}`);
+  if (items.length > 0) {
+    const preview = items.slice(0, 2);
+    for (const p of preview) {
+      console.log(
+        `[rss] STAGE=RSS_PARSE preview title=${JSON.stringify(p.title)} guid=${p.id} link=${p.link} published=${p.publishedAt ?? "unknown"}`,
+      );
+    }
+  }
+  return items;
 }
 
 function recordPostedItem(
@@ -2028,7 +2085,7 @@ export function classifyFeedItems(params: {
     });
 
     console.log(
-      `[dedupe] listingId=${candidate.listingId} decision=${decision} reason=${reason} last_posted_at=${lastPostedAt ?? "none"} published_at=${candidate.publishedAt ?? "unknown"}`,
+      `[rss] STAGE=DEDUPE_CHECK listingId=${candidate.listingId} canonicalUrl=${candidate.canonicalListingUrl} decision=${decision} reason=${reason} last_posted_at=${lastPostedAt ?? "none"} published_at=${candidate.publishedAt ?? "unknown"}`,
     );
 
     if (decision === "NEW") {
@@ -2084,7 +2141,11 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
       logMeta("skipped_due_to_daily_limit", {
         reason: gate.reason,
         last_successful_post_at: currentState.last_successful_post_at ?? null,
+        last_attempted_post_at: currentState.last_attempted_post_at ?? null,
       });
+      console.log(
+        `[rss] STAGE=GATE_CHECK result=BLOCKED reason=${gate.reason ?? "unknown"} last_successful_post_at=${currentState.last_successful_post_at ?? "never"} last_attempted_post_at=${currentState.last_attempted_post_at ?? "never"} fetched=${items.length} — feed has items but gate prevented processing`,
+      );
       console.log(
         `[rss][metrics] trigger=${trigger} fetched=${items.length} inspected=0 new=0 skipped_dedupe=0 skipped_feed_dup=0 skipped_missing_id=0 gate_reason=${gate.reason ?? "unknown"} ignore_dedupe=${IGNORE_DEDUPE}`,
       );
