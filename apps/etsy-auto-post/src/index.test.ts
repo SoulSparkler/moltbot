@@ -8,6 +8,10 @@ import {
   classifyFeedItems,
   isDuplicate,
   shouldPostNow,
+  truncateAtSentenceBoundary,
+  buildFacebookCaption,
+  buildInstagramCaption,
+  buildPinterestCaption,
 } from "./index.js";
 
 describe("canonicalizeEtsyUrl", () => {
@@ -238,5 +242,159 @@ describe("extractRssImageUrl", () => {
     const html =
       '<p><img src="https://i.etsystatic.com/12345/r/il_rss.jpg" alt="Example" /></p><p>Body</p>';
     expect(extractRssImageUrl(html)).toBe("https://i.etsystatic.com/12345/r/il_rss.jpg");
+  });
+});
+
+describe("truncateAtSentenceBoundary", () => {
+  it("returns text unchanged when under the limit", () => {
+    expect(truncateAtSentenceBoundary("Hello world.", 100)).toBe("Hello world.");
+  });
+
+  it("cuts at sentence-ending punctuation within the last 25%", () => {
+    const text = "First sentence. Second sentence is longer and goes on. Third sentence continues here.";
+    const result = truncateAtSentenceBoundary(text, 60);
+    expect(result).toBe("First sentence. Second sentence is longer and goes on.");
+    expect(result.length).toBeLessThanOrEqual(60);
+  });
+
+  it("never cuts mid-word", () => {
+    const text = "This is a very long sentence without any punctuation marks whatsoever in the text";
+    const result = truncateAtSentenceBoundary(text, 40);
+    expect(result.length).toBeLessThanOrEqual(40);
+    // Should end at a complete word, not mid-word
+    expect(result).toBe("This is a very long sentence without");
+    // Verify no partial word at the end
+    expect(text.startsWith(result)).toBe(true);
+  });
+
+  it("cuts at last whitespace when no punctuation is found", () => {
+    const text = "word1 word2 word3 word4 word5 word6 word7 word8 word9 word10";
+    const result = truncateAtSentenceBoundary(text, 30);
+    expect(result.length).toBeLessThanOrEqual(30);
+    // Ends at a complete word boundary
+    expect(result).toBe("word1 word2 word3 word4 word5");
+  });
+
+  it("returns empty string for empty input", () => {
+    expect(truncateAtSentenceBoundary("", 100)).toBe("");
+    expect(truncateAtSentenceBoundary("  ", 100)).toBe("");
+  });
+
+  it("respects exclamation and question marks as sentence boundaries", () => {
+    const text = "What a find! This vintage piece is amazing! It features hand-painted details and original patina.";
+    const result = truncateAtSentenceBoundary(text, 50);
+    expect(result).toBe("What a find! This vintage piece is amazing!");
+  });
+});
+
+describe("buildFacebookCaption", () => {
+  const baseInfo = {
+    title: "Vintage Italian Ceramic Vase",
+    titleSource: "og_title" as const,
+    description: "Beautiful hand-painted ceramic vase from the 1960s. Features floral motifs in blue and gold.",
+    descriptionSource: "og_description" as const,
+    canonicalUrl: "https://tresortendance.etsy.com/listing/12345",
+  };
+  const shareUrl = "https://tresortendance.etsy.com/listing/12345?utm_source=facebook&utm_medium=organic&utm_campaign=autopost";
+
+  it("includes the Share & Save URL line", () => {
+    const result = buildFacebookCaption(baseInfo, shareUrl);
+    expect(result.captionText).toContain("Shop it here:");
+    expect(result.captionText).toContain(shareUrl);
+  });
+
+  it("includes title as first line", () => {
+    const result = buildFacebookCaption(baseInfo, shareUrl);
+    const lines = result.captionText.split("\n");
+    expect(lines[0]).toBe("Vintage Italian Ceramic Vase");
+  });
+
+  it("includes description between title and CTA", () => {
+    const result = buildFacebookCaption(baseInfo, shareUrl);
+    expect(result.captionText).toContain("Beautiful hand-painted ceramic vase");
+  });
+
+  it("does not contain /nl/ URLs", () => {
+    const result = buildFacebookCaption(baseInfo, shareUrl);
+    expect(result.captionText).not.toContain("/nl/");
+  });
+
+  it("does not truncate description mid-sentence", () => {
+    const longDesc = "First sentence is complete. Second sentence also complete. Third sentence here too. Fourth and fifth sentences are here to push the length. Extra padding to make it really long and test the truncation boundary carefully.";
+    const info = { ...baseInfo, description: longDesc };
+    const result = buildFacebookCaption(info, shareUrl);
+    // The description portion should end at a sentence boundary
+    const descInCaption = result.captionText.split("\n").filter(Boolean);
+    // Description should not end mid-word
+    for (const line of descInCaption) {
+      if (line.startsWith("Shop it here:") || line === baseInfo.title) {continue;}
+      // Should end with punctuation or be a complete phrase
+      expect(line).toMatch(/[.!?]$|^$/);
+    }
+  });
+});
+
+describe("buildInstagramCaption", () => {
+  const baseInfo = {
+    title: "Vintage French Porcelain Plate",
+    titleSource: "og_title" as const,
+    description: "Elegant porcelain plate with hand-painted floral design. Made in Limoges, France.",
+    descriptionSource: "og_description" as const,
+    canonicalUrl: "https://tresortendance.etsy.com/listing/12345",
+  };
+
+  it("includes hashtags line", () => {
+    const result = buildInstagramCaption(baseInfo);
+    expect(result.captionText).toMatch(/#vintage/);
+    expect(result.captionText).toMatch(/#etsy/);
+    expect(result.captionText).toMatch(/#etsyfinds/);
+  });
+
+  it("contains no raw URL", () => {
+    const result = buildInstagramCaption(baseInfo);
+    expect(result.captionText).not.toMatch(/https?:\/\//);
+  });
+
+  it("includes link-in-bio line instead of raw URL", () => {
+    const result = buildInstagramCaption(baseInfo);
+    expect(result.captionText.toLowerCase()).toContain("link in bio");
+  });
+
+  it("includes at least 10 hashtags", () => {
+    const result = buildInstagramCaption(baseInfo);
+    const hashtagCount = (result.captionText.match(/#\w+/g) ?? []).length;
+    expect(hashtagCount).toBeGreaterThanOrEqual(10);
+  });
+
+  it("does not contain /nl/ URLs", () => {
+    const result = buildInstagramCaption(baseInfo);
+    expect(result.captionText).not.toContain("/nl/");
+  });
+});
+
+describe("buildPinterestCaption", () => {
+  const baseInfo = {
+    title: "Vintage Crystal Wine Glasses Set of 6",
+    titleSource: "og_title" as const,
+    description: "Beautiful set of six vintage crystal wine glasses. Perfect for entertaining or as a collector's item.",
+    descriptionSource: "og_description" as const,
+    canonicalUrl: "https://tresortendance.etsy.com/listing/12345",
+  };
+  const shareUrl = "https://tresortendance.etsy.com/listing/12345?utm_source=pinterest&utm_medium=organic&utm_campaign=autopost";
+
+  it("has title <= 100 chars", () => {
+    const result = buildPinterestCaption(baseInfo, shareUrl);
+    expect(result.title.length).toBeLessThanOrEqual(100);
+  });
+
+  it("includes hashtags in description", () => {
+    const result = buildPinterestCaption(baseInfo, shareUrl);
+    expect(result.description).toMatch(/#vintage/);
+  });
+
+  it("does not contain /nl/ URLs", () => {
+    const result = buildPinterestCaption(baseInfo, shareUrl);
+    expect(result.title).not.toContain("/nl/");
+    expect(result.description).not.toContain("/nl/");
   });
 });

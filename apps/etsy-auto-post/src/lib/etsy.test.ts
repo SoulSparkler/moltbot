@@ -3,6 +3,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   extractEtsyListingImageUrlFromHtml,
   extractEtsyRssImageUrl,
+  extractJsonLdDescriptionFromHtml,
+  extractJsonLdNameFromHtml,
+  extractOgDescriptionFromHtml,
+  extractOgTitleFromHtml,
   toShareAndSaveUrl,
 } from "./etsy.js";
 
@@ -105,5 +109,103 @@ describe("toShareAndSaveUrl", () => {
     process.env.ETSY_SHARE_AND_SAVE_DOMAIN = "customshop.etsy.com";
     const url = toShareAndSaveUrl("https://www.etsy.com/listing/99999/abc");
     expect(url).toBe("https://customshop.etsy.com/listing/99999/abc");
+  });
+});
+
+describe("extractOgTitleFromHtml", () => {
+  it("extracts og:title from meta tag", () => {
+    const html = '<html><head><meta property="og:title" content="Vintage Italian Vase" /></head></html>';
+    expect(extractOgTitleFromHtml(html)).toBe("Vintage Italian Vase");
+  });
+
+  it("returns null when og:title is missing", () => {
+    const html = "<html><head><title>Page</title></head></html>";
+    expect(extractOgTitleFromHtml(html)).toBeNull();
+  });
+});
+
+describe("extractOgDescriptionFromHtml", () => {
+  it("extracts og:description from meta tag", () => {
+    const html = '<html><head><meta property="og:description" content="Beautiful hand-painted vase from Italy." /></head></html>';
+    expect(extractOgDescriptionFromHtml(html)).toBe("Beautiful hand-painted vase from Italy.");
+  });
+
+  it("returns null when og:description is missing", () => {
+    const html = '<html><head><meta property="og:title" content="Title" /></head></html>';
+    expect(extractOgDescriptionFromHtml(html)).toBeNull();
+  });
+});
+
+describe("extractJsonLdNameFromHtml", () => {
+  it("extracts name from JSON-LD script block", () => {
+    const html = [
+      "<html><head>",
+      '<script type="application/ld+json">',
+      JSON.stringify({
+        "@context": "https://schema.org",
+        "@type": "Product",
+        name: "Vintage Crystal Glass",
+        image: "https://example.com/img.jpg",
+      }),
+      "</script>",
+      "</head></html>",
+    ].join("");
+    expect(extractJsonLdNameFromHtml(html)).toBe("Vintage Crystal Glass");
+  });
+
+  it("returns null when no name is present", () => {
+    const html = [
+      "<html><head>",
+      '<script type="application/ld+json">',
+      JSON.stringify({ "@context": "https://schema.org", "@type": "Product" }),
+      "</script>",
+      "</head></html>",
+    ].join("");
+    expect(extractJsonLdNameFromHtml(html)).toBeNull();
+  });
+});
+
+describe("extractJsonLdDescriptionFromHtml", () => {
+  it("extracts description from JSON-LD script block", () => {
+    const html = [
+      "<html><head>",
+      '<script type="application/ld+json">',
+      JSON.stringify({
+        "@context": "https://schema.org",
+        "@type": "Product",
+        name: "Vase",
+        description: "A beautiful vintage ceramic vase from the 1950s.",
+      }),
+      "</script>",
+      "</head></html>",
+    ].join("");
+    expect(extractJsonLdDescriptionFromHtml(html)).toBe("A beautiful vintage ceramic vase from the 1950s.");
+  });
+
+  it("returns null when no description is present", () => {
+    const html = [
+      "<html><head>",
+      '<script type="application/ld+json">',
+      JSON.stringify({ "@context": "https://schema.org", "@type": "Product", name: "Vase" }),
+      "</script>",
+      "</head></html>",
+    ].join("");
+    expect(extractJsonLdDescriptionFromHtml(html)).toBeNull();
+  });
+
+  it("extracts description from @graph nodes", () => {
+    const html = [
+      "<html><head>",
+      '<script type="application/ld+json">',
+      JSON.stringify({
+        "@context": "https://schema.org",
+        "@graph": [
+          { "@type": "Product", name: "Plate", description: "Vintage French plate." },
+        ],
+      }),
+      "</script>",
+      "</head></html>",
+    ].join("");
+    expect(extractJsonLdDescriptionFromHtml(html)).toBe("Vintage French plate.");
   });
 });

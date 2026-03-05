@@ -5,7 +5,9 @@ import { fileURLToPath } from "node:url";
 import {
   extractEtsyListingImageUrlFromHtml,
   extractEtsyRssImageUrl,
+  extractJsonLdDescriptionFromHtml,
   extractJsonLdNameFromHtml,
+  extractOgDescriptionFromHtml,
   extractOgTitleFromHtml,
   toShareAndSaveUrl,
 } from "./lib/etsy.js";
@@ -541,6 +543,40 @@ function truncateText(input: string, maxLength: number): string {
   return `${text.slice(0, maxLength - 1).trimEnd()}…`;
 }
 
+export function truncateAtSentenceBoundary(text: string, maxChars: number): string {
+  const trimmed = text.trim();
+  if (!trimmed || !Number.isFinite(maxChars) || maxChars <= 0) {
+    return "";
+  }
+  if (trimmed.length <= maxChars) {
+    return trimmed;
+  }
+
+  // Look for sentence-ending punctuation in the last ~25% of the limit.
+  const searchStart = Math.floor(maxChars * 0.75);
+  const window = trimmed.slice(0, maxChars);
+  let bestCut = -1;
+  for (let i = window.length - 1; i >= searchStart; i--) {
+    if (window[i] === "." || window[i] === "!" || window[i] === "?") {
+      bestCut = i + 1;
+      break;
+    }
+  }
+
+  if (bestCut > 0) {
+    return trimmed.slice(0, bestCut).trimEnd();
+  }
+
+  // No sentence boundary found — cut at last whitespace before limit.
+  const lastSpace = window.lastIndexOf(" ");
+  if (lastSpace > 0) {
+    return trimmed.slice(0, lastSpace).trimEnd();
+  }
+
+  // No whitespace at all — hard cut at limit (should be rare).
+  return window.trimEnd();
+}
+
 function detectCaptionLanguage(text: string): "en" | "nl" {
   return isDutchText(text) ? "nl" : "en";
 }
@@ -688,12 +724,28 @@ type CaptionBuildResult = {
   translationApplied: boolean;
 };
 
+type ListingInfo = {
+  title: string;
+  titleSource: "og_title" | "jsonld_name" | "rss_fallback" | "translated";
+  description: string;
+  descriptionSource: "og_description" | "jsonld_description" | "rss_fallback" | "translated" | "none";
+  canonicalUrl: string;
+};
+
+type PlatformCaptions = {
+  facebook: CaptionBuildResult;
+  instagram: CaptionBuildResult;
+  pinterest: { title: string; description: string; captionSource: string; langDetected: "en" | "nl"; translationApplied: boolean };
+};
+
 type ResolvedImage = {
   imageUrl: string;
   imageSource: string;
   imageHost: string | null;
   ogTitle?: string | null;
+  ogDescription?: string | null;
   jsonLdName?: string | null;
+  jsonLdDescription?: string | null;
 };
 
 type PublishResult = {
@@ -780,48 +832,47 @@ function toListingCandidate(item: FeedItem): ListingCandidate | null {
   return { ...item, listingId, canonicalListingUrl };
 }
 
-async function buildCaption(params: {
+async function resolveListingInfo(params: {
   item: FeedItem;
   canonicalListingUrl: string;
-  ogTitle?: string | null;
-  jsonLdName?: string | null;
-}): Promise<CaptionBuildResult> {
+  image: ResolvedImage | null;
+}): Promise<ListingInfo> {
   const rssTitle = params.item.title.trim();
-  const descriptionText = stripHtmlToText(params.item.description);
-  // Only strip URLs from the description, not the title — titles rarely contain URLs
-  // and stripping them was causing empty captions.
-  const descriptionSnippet = truncateText(stripUrlsFromText(descriptionText), 200);
+  const rssDescriptionRaw = stripHtmlToText(params.item.description);
+  const rssDescription = stripUrlsFromText(rssDescriptionRaw);
 
-  // Title priority: og:title (English from listing page) → JSON-LD name → RSS title (may be
-  // localized to Dutch by Etsy).  RSS title is only used when both page-extracted titles fail.
-  const title = params.ogTitle?.trim() || params.jsonLdName?.trim() || rssTitle;
-  let captionSource: string;
-  if (params.ogTitle?.trim()) {
-    captionSource = descriptionSnippet ? "og_title_description" : "og_title";
-  } else if (params.jsonLdName?.trim()) {
-    captionSource = descriptionSnippet ? "json_ld_name_description" : "json_ld_name";
-  } else if (rssTitle) {
-    captionSource = descriptionSnippet ? "rss_title_description" : "rss_title";
-  } else {
-    captionSource = descriptionSnippet ? "rss_description" : "fallback_generic_en";
-  }
+  // Title priority: og:title → JSON-LD name → RSS title (fallback)
+  const ogTitle = params.image?.ogTitle?.trim() || null;
+  const jsonLdName = params.image?.jsonLdName?.trim() || null;
+  let title = ogTitle || jsonLdName || rssTitle || "Vintage find from our Etsy shop";
+  let titleSource: ListingInfo["titleSource"] = ogTitle
+    ? "og_title"
+    : jsonLdName
+      ? "jsonld_name"
+      : "rss_fallback";
 
-  const captionCandidate =
-    title && descriptionSnippet ? `${title}\n\n${descriptionSnippet}` : title || descriptionSnippet;
+  // Description priority: og:description → JSON-LD description → RSS description (fallback)
+  const ogDescription = params.image?.ogDescription?.trim() || null;
+  const jsonLdDescription = params.image?.jsonLdDescription?.trim() || null;
+  let description = ogDescription || jsonLdDescription || rssDescription || "";
+  let descriptionSource: ListingInfo["descriptionSource"] = ogDescription
+    ? "og_description"
+    : jsonLdDescription
+      ? "jsonld_description"
+      : rssDescription
+        ? "rss_fallback"
+        : "none";
 
-  let captionText = captionCandidate.trim();
-  captionText = captionText || "Listing available on Etsy.";
+  // Dutch detection and translation
+  const combinedText = `${title} ${description}`.trim();
+  let langDetected = detectCaptionLanguage(combinedText);
 
   const listingUrlLocale =
     extractEtsyListingLocaleFromUrl(params.item.link) ??
     extractEtsyListingLocaleFromUrl(params.item.id);
 
-  let langDetected = detectCaptionLanguage(captionText);
-  // URL locale (/nl/) is no longer enough on its own to force Dutch — Etsy serves
-  // /nl/ URLs to NL-based shops even for English listings.  Only upgrade to "nl"
-  // when the text has at least one weak Dutch signal (a single weak word).
   if (langDetected === "en" && listingUrlLocale === "nl") {
-    if (DUTCH_WEAK_WORDS.test(captionText)) {
+    if (DUTCH_WEAK_WORDS.test(combinedText)) {
       langDetected = "nl";
     }
     console.log(
@@ -829,34 +880,152 @@ async function buildCaption(params: {
     );
   }
 
-  let translationApplied = false;
   if (langDetected !== "en") {
     if (!OPENAI_API_KEY) {
       console.log(
-        `[caption] STAGE=CAPTION_BUILD WARNING: OPENAI_API_KEY missing — cannot translate, keeping original caption instead of falling back to generic`,
+        `[caption] STAGE=LISTING_INFO WARNING: OPENAI_API_KEY missing — cannot translate, using English template fallback`,
       );
-      // Keep the original caption rather than replacing with a meaningless generic.
+      // Never publish Dutch — use template fallback when translation unavailable
+      title = title; // keep title as-is (may still be English from og:title)
+      description = ""; // drop potentially Dutch description
+      descriptionSource = "none";
     } else {
-      const translated = await translateTextToEnglish({ text: captionText });
-      if (translated) {
-        captionText = translated;
-        translationApplied = true;
-      } else {
-        console.log(
-          `[caption] STAGE=CAPTION_BUILD WARNING: translation returned null — keeping original caption`,
-        );
-        // Keep original caption; only fall back to generic if the text itself is empty.
+      const translatedTitle = await translateTextToEnglish({ text: title });
+      if (translatedTitle) {
+        title = translatedTitle;
+        titleSource = "translated";
+      }
+      if (description) {
+        const translatedDesc = await translateTextToEnglish({ text: description });
+        if (translatedDesc) {
+          description = translatedDesc;
+          descriptionSource = "translated";
+        } else {
+          description = "";
+          descriptionSource = "none";
+        }
       }
     }
   }
 
-  captionText = captionText.trim() || "Listing available on Etsy.";
-
   console.log(
-    `[caption] STAGE=CAPTION_BUILD source=${captionSource} lang=${langDetected} translated=${translationApplied ? "yes" : "no"} length=${captionText.length} url_locale=${listingUrlLocale ?? "none"} openai_key_present=${OPENAI_API_KEY ? "yes" : "no"}`,
+    `[caption] STAGE=LISTING_INFO title_source=${titleSource} desc_source=${descriptionSource} lang=${langDetected} title_len=${title.length} desc_len=${description.length} url_locale=${listingUrlLocale ?? "none"}`,
   );
 
-  return { captionText, captionSource, langDetected, translationApplied };
+  return {
+    title,
+    titleSource,
+    description,
+    descriptionSource,
+    canonicalUrl: params.canonicalListingUrl,
+  };
+}
+
+const INSTAGRAM_HASHTAGS = [
+  "#vintage", "#antique", "#etsy", "#etsyfinds", "#vintageshop",
+  "#vintagedecor", "#vintagehomedecor", "#antiquefinds", "#vintagestyle",
+  "#etsyvintage", "#homedecor", "#vintagelove", "#retro", "#brocante",
+  "#vintagelife", "#treasurehunt", "#uniquefinds", "#shopvintage",
+];
+
+export function buildFacebookCaption(info: ListingInfo, shareUrl: string): CaptionBuildResult {
+  const titleLine = info.title;
+  const descLine = info.description
+    ? truncateAtSentenceBoundary(info.description, 260)
+    : "";
+  const ctaLine = `Shop it here: ${shareUrl}`;
+
+  const parts = [titleLine];
+  if (descLine) {
+    parts.push("", descLine);
+  }
+  parts.push("", ctaLine);
+
+  const captionText = parts.join("\n");
+  const captionSource = info.titleSource === "translated" ? "translated" : info.titleSource;
+
+  console.log(
+    `[caption] STAGE=FB_CAPTION source=${captionSource} fb_len=${captionText.length} desc_truncated=${info.description.length > 260 ? "yes" : "no"}`,
+  );
+
+  return {
+    captionText,
+    captionSource,
+    langDetected: "en",
+    translationApplied: info.titleSource === "translated" || info.descriptionSource === "translated",
+  };
+}
+
+export function buildInstagramCaption(info: ListingInfo): CaptionBuildResult {
+  // Hook line — short and engaging, different from FB title
+  const hookLine = info.title;
+  const descLine = info.description
+    ? truncateAtSentenceBoundary(info.description, 220)
+    : "";
+  // Pick 12-18 hashtags
+  const hashtags = INSTAGRAM_HASHTAGS.slice(0, 15).join(" ");
+
+  const parts = [hookLine];
+  if (descLine) {
+    parts.push("", descLine);
+  }
+  parts.push("", "Find this and more in our shop — link in bio.");
+  parts.push("", hashtags);
+
+  const captionText = parts.join("\n");
+  const captionSource = info.titleSource === "translated" ? "translated" : info.titleSource;
+
+  console.log(
+    `[caption] STAGE=IG_CAPTION source=${captionSource} ig_len=${captionText.length} desc_truncated=${info.description.length > 220 ? "yes" : "no"}`,
+  );
+
+  return {
+    captionText,
+    captionSource,
+    langDetected: "en",
+    translationApplied: info.titleSource === "translated" || info.descriptionSource === "translated",
+  };
+}
+
+export function buildPinterestCaption(
+  info: ListingInfo,
+  shareUrl: string,
+): PlatformCaptions["pinterest"] {
+  const title = truncateAtSentenceBoundary(info.title, 100);
+  const descText = info.description
+    ? truncateAtSentenceBoundary(info.description, 450)
+    : "Vintage treasure from our Etsy shop.";
+  const pinHashtags = INSTAGRAM_HASHTAGS.slice(0, 10).join(" ");
+  const description = `${descText}\n\n${pinHashtags}`;
+  const captionSource = info.titleSource === "translated" ? "translated" : info.titleSource;
+
+  console.log(
+    `[caption] STAGE=PIN_CAPTION source=${captionSource} title_len=${title.length} desc_len=${description.length}`,
+  );
+
+  return {
+    title,
+    description,
+    captionSource,
+    langDetected: "en",
+    translationApplied: info.titleSource === "translated" || info.descriptionSource === "translated",
+  };
+}
+
+async function buildPlatformCaptions(params: {
+  item: FeedItem;
+  canonicalListingUrl: string;
+  image: ResolvedImage | null;
+}): Promise<PlatformCaptions> {
+  const info = await resolveListingInfo(params);
+  const fbShareUrl = buildShareAndSaveUrl(params.canonicalListingUrl, "facebook");
+  const pinShareUrl = buildShareAndSaveUrl(params.canonicalListingUrl, "pinterest");
+
+  return {
+    facebook: buildFacebookCaption(info, fbShareUrl),
+    instagram: buildInstagramCaption(info),
+    pinterest: buildPinterestCaption(info, pinShareUrl),
+  };
 }
 
 async function resolveImageForItem(params: {
@@ -865,22 +1034,23 @@ async function resolveImageForItem(params: {
 }): Promise<ResolvedImage | null> {
   const rssImage = extractEtsyRssImageUrl(params.item);
 
-  // Always fetch listing HTML for the canonical English title (og:title / JSON-LD name),
-  // even when the RSS already provided an image.  The RSS title may be localized (e.g. Dutch).
-  let ogTitle: string | null = null;
-  let jsonLdName: string | null = null;
+  // Always fetch listing HTML for the canonical English title and description,
+  // even when the RSS already provided an image.  RSS content may be localized (e.g. Dutch).
   try {
     const resolved = await resolveEtsyListingImageUrl(params.canonicalListingUrl);
-    ogTitle = resolved.ogTitle;
-    jsonLdName = resolved.jsonLdName;
+    const meta = {
+      ogTitle: resolved.ogTitle,
+      ogDescription: resolved.ogDescription,
+      jsonLdName: resolved.jsonLdName,
+      jsonLdDescription: resolved.jsonLdDescription,
+    };
 
     if (rssImage) {
       return {
         imageUrl: rssImage,
         imageSource: "rss_description_img",
         imageHost: urlHostOrNull(rssImage),
-        ogTitle,
-        jsonLdName,
+        ...meta,
       };
     }
 
@@ -888,8 +1058,7 @@ async function resolveImageForItem(params: {
       imageUrl: resolved.imageUrl,
       imageSource: resolved.imageSource,
       imageHost: urlHostOrNull(resolved.imageUrl),
-      ogTitle,
-      jsonLdName,
+      ...meta,
     };
   } catch {
     // HTML fetch failed — fall back to RSS image if available.
@@ -1465,7 +1634,8 @@ async function postFacebookItem(params: {
 
   const pageToken = await resolveMetaPageTokenOnce();
   const shareAndSaveUrl = buildShareAndSaveUrl(params.candidate.canonicalListingUrl, "facebook");
-  const caption = composeCaptionWithShareUrl(params.caption.captionText, shareAndSaveUrl);
+  // Facebook caption already includes the Share & Save URL (built by buildFacebookCaption)
+  const caption = params.caption.captionText;
 
   const logBase = {
     listingId: params.candidate.listingId,
@@ -1706,16 +1876,20 @@ async function resolveEtsyListingImageUrl(listingUrlNormalized: string): Promise
   imageUrl: string;
   imageSource: "og_image" | "json_ld";
   ogTitle: string | null;
+  ogDescription: string | null;
   jsonLdName: string | null;
+  jsonLdDescription: string | null;
 }> {
   const html = await fetchEtsyListingHtml({ listingUrlNormalized });
   const extracted = extractEtsyListingImageUrlFromHtml(html);
   const ogTitle = extractOgTitleFromHtml(html);
+  const ogDescription = extractOgDescriptionFromHtml(html);
   const jsonLdName = extractJsonLdNameFromHtml(html);
+  const jsonLdDescription = extractJsonLdDescriptionFromHtml(html);
   if (!extracted?.url) {
     throw new Error("ETSY_IMAGE_URL_MISSING: unable to extract og:image or JSON-LD image.");
   }
-  return { listingUrlNormalized, imageUrl: extracted.url, imageSource: extracted.source, ogTitle, jsonLdName };
+  return { listingUrlNormalized, imageUrl: extracted.url, imageSource: extracted.source, ogTitle, ogDescription, jsonLdName, jsonLdDescription };
 }
 
 async function postInstagramItem(params: {
@@ -1762,11 +1936,8 @@ async function postInstagramItem(params: {
   }
 
   const shareAndSaveUrl = buildShareAndSaveUrl(params.candidate.canonicalListingUrl, "instagram");
-  // Instagram: no raw URLs in caption (not clickable); use hashtags instead
-  const igHashtags = "#vintage #antique #etsy #etsyfinds #vintageshop";
-  const captionForPost = params.caption.captionText
-    ? `${params.caption.captionText}\n\n${igHashtags}`
-    : igHashtags;
+  // Instagram caption already includes hashtags and "link in bio" (built by buildInstagramCaption)
+  const captionForPost = params.caption.captionText;
 
   logMeta("instagram_publish_attempt", {
     listingId: params.candidate.listingId,
@@ -2047,7 +2218,7 @@ async function createTestPinterestPin(): Promise<PinterestTestResult> {
 
 async function postPinterestItem(params: {
   candidate: ListingCandidate;
-  caption: CaptionBuildResult;
+  caption: PlatformCaptions["pinterest"];
   image: ResolvedImage | null;
 }): Promise<PublishResult & { pinId: string | null }> {
   if (!pinterestEnabled()) {
@@ -2062,8 +2233,8 @@ async function postPinterestItem(params: {
   }
 
   const shareAndSaveUrl = buildShareAndSaveUrl(params.candidate.canonicalListingUrl, "pinterest");
-  const title = params.caption.captionText.split("\n")[0]?.slice(0, 100) || "Antique & Vintage Find";
-  const description = params.caption.captionText || "Vintage treasure from our Etsy shop.";
+  const title = params.caption.title || "Antique & Vintage Find";
+  const description = params.caption.description || "Vintage treasure from our Etsy shop.";
 
   console.log(
     `[rss] STAGE=POST_PINTEREST attempt listing=${params.candidate.listingId} board_id=${PINTEREST_BOARD_ID} image_host=${params.image.imageHost ?? "unknown"} title_len=${title.length}`,
@@ -2422,13 +2593,6 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
         canonicalListingUrl: selected.canonicalListingUrl,
       });
 
-      const caption = await buildCaption({
-        item: selected,
-        canonicalListingUrl: selected.canonicalListingUrl,
-        ogTitle: image?.ogTitle,
-        jsonLdName: image?.jsonLdName,
-      });
-
       if (!image) {
         logMeta("publish_skipped", {
           listingId: selected.listingId,
@@ -2438,9 +2602,15 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
         continue;
       }
 
-      const fbResult = await postFacebookItem({ candidate: selected, caption, image });
-      const igResult = await postInstagramItem({ candidate: selected, caption, image });
-      const pinResult = await postPinterestItem({ candidate: selected, caption, image });
+      const captions = await buildPlatformCaptions({
+        item: selected,
+        canonicalListingUrl: selected.canonicalListingUrl,
+        image,
+      });
+
+      const fbResult = await postFacebookItem({ candidate: selected, caption: captions.facebook, image });
+      const igResult = await postInstagramItem({ candidate: selected, caption: captions.instagram, image });
+      const pinResult = await postPinterestItem({ candidate: selected, caption: captions.pinterest, image });
 
       const attemptedAny = fbResult.attempted || igResult.attempted || pinResult.attempted;
       if (attemptedAny) {
