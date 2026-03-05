@@ -1818,13 +1818,43 @@ async function resolveInstagramBusinessOnce(): Promise<InstagramBusinessAccount 
 const ETSY_LISTING_HTML_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36";
 
+/**
+ * Normalize a listing URL to the bare www.etsy.com form for HTML fetching.
+ * Shop-subdomain URLs (tresortendance.etsy.com) and locale-prefixed paths (/nl/)
+ * can cause Etsy to return localized (Dutch) metadata.  Stripping both ensures
+ * the fetch returns the original English og:title / og:description.
+ */
+export function toEnglishFetchUrl(listingUrl: string): string {
+  try {
+    const parsed = new URL(listingUrl);
+    // Only normalize Etsy URLs
+    if (!parsed.hostname.endsWith("etsy.com")) {
+      return listingUrl;
+    }
+    // Strip locale prefix from pathname (e.g. /nl/listing/123 → /listing/123)
+    parsed.pathname = parsed.pathname.replace(/^\/[a-z]{2}(?:-[a-z]{2})?\/listing\//i, "/listing/");
+    // Always use www.etsy.com (not shop subdomain) to avoid geo-localized responses
+    parsed.hostname = "www.etsy.com";
+    // Strip query/hash — only the path matters for metadata extraction
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return listingUrl;
+  }
+}
+
 async function fetchEtsyListingHtml(params: { listingUrlNormalized: string }): Promise<string> {
+  const fetchUrl = toEnglishFetchUrl(params.listingUrlNormalized);
+  if (fetchUrl !== params.listingUrlNormalized) {
+    console.log(`[rss] STAGE=HTML_FETCH normalized ${params.listingUrlNormalized} → ${fetchUrl}`);
+  }
   let lastStatus: number | null = null;
   let lastError: unknown = null;
 
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     try {
-      const response = await fetch(params.listingUrlNormalized, {
+      const response = await fetch(fetchUrl, {
         headers: {
           accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
           "accept-language": "en-US,en;q=0.9",

@@ -12,6 +12,7 @@ import {
   buildFacebookCaption,
   buildInstagramCaption,
   buildPinterestCaption,
+  toEnglishFetchUrl,
 } from "./index.js";
 
 describe("canonicalizeEtsyUrl", () => {
@@ -396,5 +397,47 @@ describe("buildPinterestCaption", () => {
     const result = buildPinterestCaption(baseInfo, shareUrl);
     expect(result.title).not.toContain("/nl/");
     expect(result.description).not.toContain("/nl/");
+  });
+});
+
+describe("toEnglishFetchUrl", () => {
+  it("strips /nl/ locale prefix from listing URL", () => {
+    expect(
+      toEnglishFetchUrl("https://www.etsy.com/nl/listing/4467098011/vintage-pradel-foo"),
+    ).toBe("https://www.etsy.com/listing/4467098011/vintage-pradel-foo");
+  });
+
+  it("rewrites shop subdomain to www.etsy.com", () => {
+    expect(
+      toEnglishFetchUrl("https://tresortendance.etsy.com/listing/4467098011"),
+    ).toBe("https://www.etsy.com/listing/4467098011");
+  });
+
+  it("strips both locale prefix and shop subdomain", () => {
+    expect(
+      toEnglishFetchUrl("https://tresortendance.etsy.com/nl/listing/12345/slug?ref=rss"),
+    ).toBe("https://www.etsy.com/listing/12345/slug");
+  });
+
+  it("strips query params and hash", () => {
+    expect(
+      toEnglishFetchUrl("https://www.etsy.com/listing/99999/vase?ref=rss&utm_source=x#section"),
+    ).toBe("https://www.etsy.com/listing/99999/vase");
+  });
+
+  it("returns input unchanged for non-Etsy URLs", () => {
+    expect(toEnglishFetchUrl("https://example.com/page")).toBe("https://example.com/page");
+  });
+
+  it("never produces a URL containing /nl/", () => {
+    const inputs = [
+      "https://www.etsy.com/nl/listing/111/item",
+      "https://tresortendance.etsy.com/nl/listing/222/item?ref=rss",
+      "https://www.etsy.com/nl-BE/listing/333/item",
+    ];
+    for (const url of inputs) {
+      expect(toEnglishFetchUrl(url)).not.toContain("/nl/");
+      expect(toEnglishFetchUrl(url)).not.toContain("/nl-");
+    }
   });
 });
