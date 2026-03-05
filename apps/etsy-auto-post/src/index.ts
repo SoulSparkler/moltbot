@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import {
   extractEtsyListingImageUrlFromHtml,
   extractEtsyRssImageUrl,
+  extractJsonLdNameFromHtml,
   extractOgTitleFromHtml,
   toShareAndSaveUrl,
 } from "./lib/etsy.js";
@@ -692,6 +693,7 @@ type ResolvedImage = {
   imageSource: string;
   imageHost: string | null;
   ogTitle?: string | null;
+  jsonLdName?: string | null;
 };
 
 type PublishResult = {
@@ -782,30 +784,32 @@ async function buildCaption(params: {
   item: FeedItem;
   canonicalListingUrl: string;
   ogTitle?: string | null;
+  jsonLdName?: string | null;
 }): Promise<CaptionBuildResult> {
-  const title = params.item.title.trim();
+  const rssTitle = params.item.title.trim();
   const descriptionText = stripHtmlToText(params.item.description);
   // Only strip URLs from the description, not the title — titles rarely contain URLs
   // and stripping them was causing empty captions.
   const descriptionSnippet = truncateText(stripUrlsFromText(descriptionText), 200);
 
+  // Title priority: og:title (English from listing page) → JSON-LD name → RSS title (may be
+  // localized to Dutch by Etsy).  RSS title is only used when both page-extracted titles fail.
+  const title = params.ogTitle?.trim() || params.jsonLdName?.trim() || rssTitle;
+  let captionSource: string;
+  if (params.ogTitle?.trim()) {
+    captionSource = descriptionSnippet ? "og_title_description" : "og_title";
+  } else if (params.jsonLdName?.trim()) {
+    captionSource = descriptionSnippet ? "json_ld_name_description" : "json_ld_name";
+  } else if (rssTitle) {
+    captionSource = descriptionSnippet ? "rss_title_description" : "rss_title";
+  } else {
+    captionSource = descriptionSnippet ? "rss_description" : "fallback_generic_en";
+  }
+
   const captionCandidate =
     title && descriptionSnippet ? `${title}\n\n${descriptionSnippet}` : title || descriptionSnippet;
 
-  let captionSource = title
-    ? descriptionSnippet
-      ? "rss_title_description"
-      : "rss_title"
-    : descriptionSnippet
-      ? "rss_description"
-      : "fallback_generic_en";
-
-  // Use og:title from listing HTML as fallback before the generic string
   let captionText = captionCandidate.trim();
-  if (!captionText && params.ogTitle?.trim()) {
-    captionText = params.ogTitle.trim();
-    captionSource = "og_title";
-  }
   captionText = captionText || "Listing available on Etsy.";
 
   const listingUrlLocale =
@@ -860,23 +864,42 @@ async function resolveImageForItem(params: {
   canonicalListingUrl: string;
 }): Promise<ResolvedImage | null> {
   const rssImage = extractEtsyRssImageUrl(params.item);
-  if (rssImage) {
-    return {
-      imageUrl: rssImage,
-      imageSource: "rss_description_img",
-      imageHost: urlHostOrNull(rssImage),
-    };
-  }
 
+  // Always fetch listing HTML for the canonical English title (og:title / JSON-LD name),
+  // even when the RSS already provided an image.  The RSS title may be localized (e.g. Dutch).
+  let ogTitle: string | null = null;
+  let jsonLdName: string | null = null;
   try {
     const resolved = await resolveEtsyListingImageUrl(params.canonicalListingUrl);
+    ogTitle = resolved.ogTitle;
+    jsonLdName = resolved.jsonLdName;
+
+    if (rssImage) {
+      return {
+        imageUrl: rssImage,
+        imageSource: "rss_description_img",
+        imageHost: urlHostOrNull(rssImage),
+        ogTitle,
+        jsonLdName,
+      };
+    }
+
     return {
       imageUrl: resolved.imageUrl,
       imageSource: resolved.imageSource,
       imageHost: urlHostOrNull(resolved.imageUrl),
-      ogTitle: resolved.ogTitle,
+      ogTitle,
+      jsonLdName,
     };
   } catch {
+    // HTML fetch failed — fall back to RSS image if available.
+    if (rssImage) {
+      return {
+        imageUrl: rssImage,
+        imageSource: "rss_description_img",
+        imageHost: urlHostOrNull(rssImage),
+      };
+    }
     return null;
   }
 }
@@ -1683,14 +1706,16 @@ async function resolveEtsyListingImageUrl(listingUrlNormalized: string): Promise
   imageUrl: string;
   imageSource: "og_image" | "json_ld";
   ogTitle: string | null;
+  jsonLdName: string | null;
 }> {
   const html = await fetchEtsyListingHtml({ listingUrlNormalized });
   const extracted = extractEtsyListingImageUrlFromHtml(html);
   const ogTitle = extractOgTitleFromHtml(html);
+  const jsonLdName = extractJsonLdNameFromHtml(html);
   if (!extracted?.url) {
     throw new Error("ETSY_IMAGE_URL_MISSING: unable to extract og:image or JSON-LD image.");
   }
-  return { listingUrlNormalized, imageUrl: extracted.url, imageSource: extracted.source, ogTitle };
+  return { listingUrlNormalized, imageUrl: extracted.url, imageSource: extracted.source, ogTitle, jsonLdName };
 }
 
 async function postInstagramItem(params: {
@@ -2401,6 +2426,7 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
         item: selected,
         canonicalListingUrl: selected.canonicalListingUrl,
         ogTitle: image?.ogTitle,
+        jsonLdName: image?.jsonLdName,
       });
 
       if (!image) {

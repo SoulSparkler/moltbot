@@ -183,6 +183,65 @@ function extractImageUrlFromJsonLdNode(node: unknown, depth: number): string | n
   return null;
 }
 
+function extractJsonLdNameFromNode(node: unknown, depth: number): string | null {
+  if (depth <= 0) {
+    return null;
+  }
+
+  if (Array.isArray(node)) {
+    for (const entry of node) {
+      const found = extractJsonLdNameFromNode(entry, depth - 1);
+      if (found) {
+        return found;
+      }
+    }
+    return null;
+  }
+
+  const record = asRecord(node);
+  if (!record) {
+    return null;
+  }
+
+  if (Object.hasOwn(record, "name") && typeof record.name === "string" && record.name.trim()) {
+    return record.name.trim();
+  }
+
+  if (Object.hasOwn(record, "@graph")) {
+    const candidate = extractJsonLdNameFromNode(record["@graph"], depth - 1);
+    if (candidate) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+export function extractJsonLdNameFromHtml(html: string): string | null {
+  const re =
+    /<script\b[^>]*type\s*=\s*(?:"application\/ld\+json"|'application\/ld\+json'|application\/ld\+json)[^>]*>([\s\S]*?)<\/script>/gi;
+  for (const match of html.matchAll(re)) {
+    const raw = match[1]?.trim() ?? "";
+    if (!raw) {
+      continue;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw) as unknown;
+    } catch {
+      continue;
+    }
+
+    const found = extractJsonLdNameFromNode(parsed, 14);
+    if (found) {
+      return found;
+    }
+  }
+
+  return null;
+}
+
 function extractJsonLdImageUrlFromHtml(html: string): string | null {
   const re =
     /<script\b[^>]*type\s*=\s*(?:"application\/ld\+json"|'application\/ld\+json'|application\/ld\+json)[^>]*>([\s\S]*?)<\/script>/gi;
