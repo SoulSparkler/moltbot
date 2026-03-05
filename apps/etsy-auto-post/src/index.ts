@@ -742,10 +742,6 @@ type ResolvedImage = {
   imageUrl: string;
   imageSource: string;
   imageHost: string | null;
-  ogTitle?: string | null;
-  ogDescription?: string | null;
-  jsonLdName?: string | null;
-  jsonLdDescription?: string | null;
 };
 
 type PublishResult = {
@@ -835,15 +831,20 @@ function toListingCandidate(item: FeedItem): ListingCandidate | null {
 async function resolveListingInfo(params: {
   item: FeedItem;
   canonicalListingUrl: string;
-  image: ResolvedImage | null;
+  listingHtml: string | null;
 }): Promise<ListingInfo> {
   const rssTitle = params.item.title.trim();
   const rssDescriptionRaw = stripHtmlToText(params.item.description);
   const rssDescription = stripUrlsFromText(rssDescriptionRaw);
 
+  // Extract metadata from listing HTML (if available)
+  const html = params.listingHtml;
+  const ogTitle = html ? extractOgTitleFromHtml(html)?.trim() || null : null;
+  const jsonLdName = html ? extractJsonLdNameFromHtml(html)?.trim() || null : null;
+  const ogDescription = html ? extractOgDescriptionFromHtml(html)?.trim() || null : null;
+  const jsonLdDescription = html ? extractJsonLdDescriptionFromHtml(html)?.trim() || null : null;
+
   // Title priority: og:title → JSON-LD name → RSS title (fallback)
-  const ogTitle = params.image?.ogTitle?.trim() || null;
-  const jsonLdName = params.image?.jsonLdName?.trim() || null;
   let title = ogTitle || jsonLdName || rssTitle || "Vintage find from our Etsy shop";
   let titleSource: ListingInfo["titleSource"] = ogTitle
     ? "og_title"
@@ -852,8 +853,6 @@ async function resolveListingInfo(params: {
       : "rss_fallback";
 
   // Description priority: og:description → JSON-LD description → RSS description (fallback)
-  const ogDescription = params.image?.ogDescription?.trim() || null;
-  const jsonLdDescription = params.image?.jsonLdDescription?.trim() || null;
   let description = ogDescription || jsonLdDescription || rssDescription || "";
   let descriptionSource: ListingInfo["descriptionSource"] = ogDescription
     ? "og_description"
@@ -1015,7 +1014,7 @@ export function buildPinterestCaption(
 async function buildPlatformCaptions(params: {
   item: FeedItem;
   canonicalListingUrl: string;
-  image: ResolvedImage | null;
+  listingHtml: string | null;
 }): Promise<PlatformCaptions> {
   const info = await resolveListingInfo(params);
   const fbShareUrl = buildShareAndSaveUrl(params.canonicalListingUrl, "facebook");
@@ -1028,49 +1027,33 @@ async function buildPlatformCaptions(params: {
   };
 }
 
-async function resolveImageForItem(params: {
+function resolveImageForItem(params: {
   item: ListingCandidate;
-  canonicalListingUrl: string;
-}): Promise<ResolvedImage | null> {
+  listingHtml: string | null;
+}): ResolvedImage | null {
   const rssImage = extractEtsyRssImageUrl(params.item);
-
-  // Always fetch listing HTML for the canonical English title and description,
-  // even when the RSS already provided an image.  RSS content may be localized (e.g. Dutch).
-  try {
-    const resolved = await resolveEtsyListingImageUrl(params.canonicalListingUrl);
-    const meta = {
-      ogTitle: resolved.ogTitle,
-      ogDescription: resolved.ogDescription,
-      jsonLdName: resolved.jsonLdName,
-      jsonLdDescription: resolved.jsonLdDescription,
-    };
-
-    if (rssImage) {
-      return {
-        imageUrl: rssImage,
-        imageSource: "rss_description_img",
-        imageHost: urlHostOrNull(rssImage),
-        ...meta,
-      };
-    }
-
+  if (rssImage) {
     return {
-      imageUrl: resolved.imageUrl,
-      imageSource: resolved.imageSource,
-      imageHost: urlHostOrNull(resolved.imageUrl),
-      ...meta,
+      imageUrl: rssImage,
+      imageSource: "rss_description_img",
+      imageHost: urlHostOrNull(rssImage),
     };
-  } catch {
-    // HTML fetch failed — fall back to RSS image if available.
-    if (rssImage) {
-      return {
-        imageUrl: rssImage,
-        imageSource: "rss_description_img",
-        imageHost: urlHostOrNull(rssImage),
-      };
-    }
-    return null;
   }
+
+  if (params.listingHtml) {
+    try {
+      const resolved = resolveImageFromListingHtml(params.listingHtml);
+      return {
+        imageUrl: resolved.imageUrl,
+        imageSource: resolved.imageSource,
+        imageHost: urlHostOrNull(resolved.imageUrl),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
 }
 
 async function loadState(): Promise<WatcherState> {
@@ -1871,25 +1854,15 @@ async function fetchEtsyListingHtml(params: { listingUrlNormalized: string }): P
   );
 }
 
-async function resolveEtsyListingImageUrl(listingUrlNormalized: string): Promise<{
-  listingUrlNormalized: string;
+function resolveImageFromListingHtml(html: string): {
   imageUrl: string;
   imageSource: "og_image" | "json_ld";
-  ogTitle: string | null;
-  ogDescription: string | null;
-  jsonLdName: string | null;
-  jsonLdDescription: string | null;
-}> {
-  const html = await fetchEtsyListingHtml({ listingUrlNormalized });
+} {
   const extracted = extractEtsyListingImageUrlFromHtml(html);
-  const ogTitle = extractOgTitleFromHtml(html);
-  const ogDescription = extractOgDescriptionFromHtml(html);
-  const jsonLdName = extractJsonLdNameFromHtml(html);
-  const jsonLdDescription = extractJsonLdDescriptionFromHtml(html);
   if (!extracted?.url) {
     throw new Error("ETSY_IMAGE_URL_MISSING: unable to extract og:image or JSON-LD image.");
   }
-  return { listingUrlNormalized, imageUrl: extracted.url, imageSource: extracted.source, ogTitle, ogDescription, jsonLdName, jsonLdDescription };
+  return { imageUrl: extracted.url, imageSource: extracted.source };
 }
 
 async function postInstagramItem(params: {
@@ -2588,10 +2561,15 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
         batch_total: toPost.length,
       });
 
-      const image = await resolveImageForItem({
-        item: selected,
-        canonicalListingUrl: selected.canonicalListingUrl,
-      });
+      // Fetch listing HTML once — used by both image resolution and caption building.
+      let listingHtml: string | null = null;
+      try {
+        listingHtml = await fetchEtsyListingHtml({ listingUrlNormalized: selected.canonicalListingUrl });
+      } catch (error) {
+        console.log(`[rss] listing HTML fetch failed for ${selected.canonicalListingUrl}: ${String(error)}`);
+      }
+
+      const image = resolveImageForItem({ item: selected, listingHtml });
 
       if (!image) {
         logMeta("publish_skipped", {
@@ -2605,7 +2583,7 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
       const captions = await buildPlatformCaptions({
         item: selected,
         canonicalListingUrl: selected.canonicalListingUrl,
-        image,
+        listingHtml,
       });
 
       const fbResult = await postFacebookItem({ candidate: selected, caption: captions.facebook, image });

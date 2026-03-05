@@ -67,7 +67,7 @@ describe("toShareAndSaveUrl", () => {
     }
   });
 
-  it("rewrites Etsy listing URLs to the shop domain and keeps slug + query params", () => {
+  it("rewrites Etsy listing URLs to the shop domain, strips slug, and keeps query params", () => {
     process.env.ETSY_SHARE_AND_SAVE_DOMAIN = "tresortendance.etsy.com";
 
     const url = toShareAndSaveUrl("https://www.etsy.com/listing/12345/vintage-vase?ref=rss", {
@@ -77,7 +77,7 @@ describe("toShareAndSaveUrl", () => {
     });
 
     expect(url).toBe(
-      "https://tresortendance.etsy.com/listing/12345/vintage-vase?ref=rss&utm_source=facebook&utm_medium=organic&utm_campaign=autopost",
+      "https://tresortendance.etsy.com/listing/12345?ref=rss&utm_source=facebook&utm_medium=organic&utm_campaign=autopost",
     );
   });
 
@@ -88,14 +88,14 @@ describe("toShareAndSaveUrl", () => {
     );
 
     expect(url).toBe(
-      "https://tresortendance.etsy.com/listing/99999/abc?utm_source=facebook&utm_medium=organic&utm_campaign=autopost&ref=rss",
+      "https://tresortendance.etsy.com/listing/99999?utm_source=facebook&utm_medium=organic&utm_campaign=autopost&ref=rss",
     );
   });
 
   it("normalizes configured domain even when protocol or trailing slashes are set", () => {
     process.env.ETSY_SHARE_AND_SAVE_DOMAIN = "https://customshop.etsy.com/";
     const url = toShareAndSaveUrl("https://www.etsy.com/listing/888/slug");
-    expect(url).toBe("https://customshop.etsy.com/listing/888/slug");
+    expect(url).toBe("https://customshop.etsy.com/listing/888");
   });
 
   it("falls back to the original URL for non-Etsy links", () => {
@@ -108,7 +108,7 @@ describe("toShareAndSaveUrl", () => {
   it("uses the configured share-and-save domain when provided", () => {
     process.env.ETSY_SHARE_AND_SAVE_DOMAIN = "customshop.etsy.com";
     const url = toShareAndSaveUrl("https://www.etsy.com/listing/99999/abc");
-    expect(url).toBe("https://customshop.etsy.com/listing/99999/abc");
+    expect(url).toBe("https://customshop.etsy.com/listing/99999");
   });
 });
 
