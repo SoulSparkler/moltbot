@@ -13,6 +13,7 @@ import {
   buildInstagramCaption,
   buildPinterestCaption,
   toEnglishFetchUrl,
+  stripEtsyShopSuffix,
 } from "./index.js";
 
 describe("canonicalizeEtsyUrl", () => {
@@ -328,7 +329,7 @@ describe("buildFacebookCaption", () => {
     const descInCaption = result.captionText.split("\n").filter(Boolean);
     // Description should not end mid-word
     for (const line of descInCaption) {
-      if (line.startsWith("Shop it here:") || line === baseInfo.title) {continue;}
+      if (line.startsWith("Shop it here:") || line === baseInfo.title || line.startsWith("#")) {continue;}
       // Should end with punctuation or be a complete phrase
       expect(line).toMatch(/[.!?]$|^$/);
     }
@@ -439,5 +440,23 @@ describe("toEnglishFetchUrl", () => {
       expect(toEnglishFetchUrl(url)).not.toContain("/nl/");
       expect(toEnglishFetchUrl(url)).not.toContain("/nl-");
     }
+  });
+});
+
+describe("stripEtsyShopSuffix", () => {
+  it("strips ' by ShopName' suffix from title", () => {
+    expect(stripEtsyShopSuffix("Vintage Vase by TresorTendance")).toBe("Vintage Vase");
+  });
+
+  it("is case-insensitive", () => {
+    expect(stripEtsyShopSuffix("Vintage Vase By TresorTendance")).toBe("Vintage Vase");
+  });
+
+  it("leaves titles without suffix unchanged", () => {
+    expect(stripEtsyShopSuffix("Vintage Vase")).toBe("Vintage Vase");
+  });
+
+  it("only strips the last occurrence", () => {
+    expect(stripEtsyShopSuffix("Made by hand by TresorTendance")).toBe("Made by hand");
   });
 });

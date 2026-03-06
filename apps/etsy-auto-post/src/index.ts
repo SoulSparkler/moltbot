@@ -526,23 +526,6 @@ function stripUrlsFromText(raw: string): string {
     .trim();
 }
 
-function truncateText(input: string, maxLength: number): string {
-  const text = input.trim();
-  if (!text) {
-    return "";
-  }
-  if (!Number.isFinite(maxLength) || maxLength <= 0) {
-    return "";
-  }
-  if (text.length <= maxLength) {
-    return text;
-  }
-  if (maxLength <= 1) {
-    return text.slice(0, maxLength);
-  }
-  return `${text.slice(0, maxLength - 1).trimEnd()}…`;
-}
-
 export function truncateAtSentenceBoundary(text: string, maxChars: number): string {
   const trimmed = text.trim();
   if (!trimmed || !Number.isFinite(maxChars) || maxChars <= 0) {
@@ -828,6 +811,17 @@ function toListingCandidate(item: FeedItem): ListingCandidate | null {
   return { ...item, listingId, canonicalListingUrl };
 }
 
+/**
+ * Etsy appends " by ShopName" to og:title values.  Strip this suffix so
+ * captions use just the listing title (e.g. "Vintage Vase" instead of
+ * "Vintage Vase by TresorTendance").
+ */
+export function stripEtsyShopSuffix(title: string): string {
+  // Match " by <Word>" at end — Etsy shop names are single CamelCase or
+  // multi-word tokens; use a greedy match after the last " by ".
+  return title.replace(/\s+by\s+\S+$/i, "").trim();
+}
+
 async function resolveListingInfo(params: {
   item: FeedItem;
   canonicalListingUrl: string;
@@ -839,7 +833,8 @@ async function resolveListingInfo(params: {
 
   // Extract metadata from listing HTML (if available)
   const html = params.listingHtml;
-  const ogTitle = html ? extractOgTitleFromHtml(html)?.trim() || null : null;
+  const ogTitleRaw = html ? extractOgTitleFromHtml(html)?.trim() || null : null;
+  const ogTitle = ogTitleRaw ? stripEtsyShopSuffix(ogTitleRaw) : null;
   const jsonLdName = html ? extractJsonLdNameFromHtml(html)?.trim() || null : null;
   const ogDescription = html ? extractOgDescriptionFromHtml(html)?.trim() || null : null;
   const jsonLdDescription = html ? extractJsonLdDescriptionFromHtml(html)?.trim() || null : null;
@@ -880,19 +875,28 @@ async function resolveListingInfo(params: {
   }
 
   if (langDetected !== "en") {
+    const GENERIC_TITLE = "Vintage find from our Etsy shop";
     if (!OPENAI_API_KEY) {
       console.log(
         `[caption] STAGE=LISTING_INFO WARNING: OPENAI_API_KEY missing — cannot translate, using English template fallback`,
       );
-      // Never publish Dutch — use template fallback when translation unavailable
-      title = title; // keep title as-is (may still be English from og:title)
-      description = ""; // drop potentially Dutch description
+      // Never publish Dutch — use generic English fallback
+      title = GENERIC_TITLE;
+      titleSource = "rss_fallback";
+      description = "";
       descriptionSource = "none";
     } else {
       const translatedTitle = await translateTextToEnglish({ text: title });
       if (translatedTitle) {
         title = translatedTitle;
         titleSource = "translated";
+      } else {
+        // Translation failed — never publish Dutch
+        console.log(
+          `[caption] STAGE=LISTING_INFO WARNING: title translation returned null — using generic English fallback`,
+        );
+        title = GENERIC_TITLE;
+        titleSource = "rss_fallback";
       }
       if (description) {
         const translatedDesc = await translateTextToEnglish({ text: description });
@@ -920,6 +924,8 @@ async function resolveListingInfo(params: {
   };
 }
 
+const FACEBOOK_HASHTAGS = ["#vintage", "#etsy", "#etsyfinds"];
+
 const INSTAGRAM_HASHTAGS = [
   "#vintage", "#antique", "#etsy", "#etsyfinds", "#vintageshop",
   "#vintagedecor", "#vintagehomedecor", "#antiquefinds", "#vintagestyle",
@@ -934,11 +940,14 @@ export function buildFacebookCaption(info: ListingInfo, shareUrl: string): Capti
     : "";
   const ctaLine = `Shop it here: ${shareUrl}`;
 
+  const fbHashtags = FACEBOOK_HASHTAGS.join(" ");
+
   const parts = [titleLine];
   if (descLine) {
     parts.push("", descLine);
   }
   parts.push("", ctaLine);
+  parts.push("", fbHashtags);
 
   const captionText = parts.join("\n");
   const captionSource = info.titleSource === "translated" ? "translated" : info.titleSource;
@@ -988,7 +997,7 @@ export function buildInstagramCaption(info: ListingInfo): CaptionBuildResult {
 
 export function buildPinterestCaption(
   info: ListingInfo,
-  shareUrl: string,
+  _shareUrl: string,
 ): PlatformCaptions["pinterest"] {
   const title = truncateAtSentenceBoundary(info.title, 100);
   const descText = info.description
