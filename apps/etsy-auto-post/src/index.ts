@@ -642,6 +642,99 @@ async function translateTextToEnglish(params: { text: string }): Promise<string 
   }
 }
 
+type RewriteResult = { title: string; description: string };
+
+async function rewriteListingForSocialMedia(params: {
+  title: string;
+  description: string;
+}): Promise<RewriteResult | null> {
+  if (!OPENAI_API_KEY) {
+    return null;
+  }
+
+  const input = [
+    `Title: ${params.title}`,
+    params.description ? `Description: ${params.description}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20_000).unref();
+
+  try {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${OPENAI_API_KEY}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: RSS_TRANSLATION_OPENAI_MODEL,
+        temperature: 0.7,
+        max_tokens: 500,
+        messages: [
+          {
+            role: "system",
+            content: [
+              "You are a social media copywriter for a vintage and antique shop on Etsy.",
+              "The user provides an Etsy listing title and optional description.",
+              "Rewrite them into engaging social media copy in US English.",
+              "",
+              "Reply with EXACTLY two lines:",
+              "TITLE: A short, catchy title (max 80 characters). No ALL-CAPS keyword spam.",
+              "DESCRIPTION: One or two flowing paragraphs (max 400 characters) that describe the item naturally, highlight its charm, origin, or era, and appeal to vintage lovers. Do not use bullet points or emojis. Do not include hashtags or URLs.",
+              "",
+              "Output ONLY those two lines, nothing else.",
+            ].join("\n"),
+          },
+          { role: "user", content: input },
+        ],
+      }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      console.log(`[caption] STAGE=REWRITE openai_status=${response.status}`);
+      return null;
+    }
+
+    const json = (await response.json().catch(() => null)) as {
+      choices?: Array<{ message?: { content?: string | null } | null }>;
+    } | null;
+
+    const raw = json?.choices?.[0]?.message?.content?.trim();
+    if (!raw) {
+      return null;
+    }
+
+    const titleMatch = /^TITLE:\s*(.+)$/im.exec(raw);
+    const descMatch = /^DESCRIPTION:\s*([\s\S]+)$/im.exec(raw);
+
+    const rewrittenTitle = titleMatch?.[1]?.trim();
+    const rewrittenDesc = descMatch?.[1]?.trim();
+
+    if (!rewrittenTitle) {
+      console.log(`[caption] STAGE=REWRITE failed to parse title from response`);
+      return null;
+    }
+
+    console.log(
+      `[caption] STAGE=REWRITE ok title_len=${rewrittenTitle.length} desc_len=${rewrittenDesc?.length ?? 0}`,
+    );
+
+    return {
+      title: rewrittenTitle,
+      description: rewrittenDesc ?? "",
+    };
+  } catch (err) {
+    console.log(`[caption] STAGE=REWRITE error=${String(err)}`);
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function findTagText(block: string, tags: string[]): string {
   for (const tag of tags) {
     const re = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, "i");
@@ -709,9 +802,9 @@ type CaptionBuildResult = {
 
 type ListingInfo = {
   title: string;
-  titleSource: "og_title" | "jsonld_name" | "rss_fallback" | "translated";
+  titleSource: "og_title" | "jsonld_name" | "rss_fallback" | "translated" | "rewritten";
   description: string;
-  descriptionSource: "og_description" | "jsonld_description" | "rss_fallback" | "translated" | "none";
+  descriptionSource: "og_description" | "jsonld_description" | "rss_fallback" | "translated" | "none" | "rewritten";
   canonicalUrl: string;
 };
 
@@ -908,6 +1001,21 @@ async function resolveListingInfo(params: {
           descriptionSource = "none";
         }
       }
+    }
+  }
+
+  // AI rewrite: turn raw Etsy title+description into social-media-friendly copy
+  if (OPENAI_API_KEY && title) {
+    const rewritten = await rewriteListingForSocialMedia({ title, description });
+    if (rewritten) {
+      title = rewritten.title;
+      titleSource = "rewritten";
+      if (rewritten.description) {
+        description = rewritten.description;
+        descriptionSource = "rewritten";
+      }
+    } else {
+      console.log(`[caption] STAGE=LISTING_INFO rewrite failed — using original text`);
     }
   }
 
