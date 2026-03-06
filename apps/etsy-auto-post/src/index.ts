@@ -39,7 +39,11 @@ const META_REQUIRED_PERMISSIONS = [
 const ETSY_SHOP_RSS_URL = process.env.ETSY_SHOP_RSS_URL?.trim() ?? "";
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN?.trim() ?? "";
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID?.trim() ?? "";
-const TELEGRAM_POLLING_ENABLED = process.env.RUN_TELEGRAM_POLLING === "true";
+// RSS_TELEGRAM_POLLING is the sidecar-specific override.
+// When running as a sidecar alongside the gateway, this MUST be "false" (or unset)
+// to avoid a Telegram 409 conflict — only one process may poll a bot token.
+const TELEGRAM_POLLING_ENABLED =
+  (process.env.RSS_TELEGRAM_POLLING ?? process.env.RUN_TELEGRAM_POLLING) === "true";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY?.trim() ?? "";
 const RSS_TRANSLATION_OPENAI_MODEL =
   process.env.RSS_TRANSLATION_OPENAI_MODEL?.trim() ?? "gpt-4o-mini";
@@ -3055,7 +3059,9 @@ async function main(): Promise<void> {
   resolvedBuildInfo = buildInfo;
   logBuildProof(buildInfo);
   logSelfCheck(buildInfo);
-  console.log(`telegram.polling.enabled=${TELEGRAM_POLLING_ENABLED}`);
+  console.log(
+    `[rss] telegram.polling.enabled=${TELEGRAM_POLLING_ENABLED} (RSS_TELEGRAM_POLLING=${process.env.RSS_TELEGRAM_POLLING ?? "unset"}, RUN_TELEGRAM_POLLING=${process.env.RUN_TELEGRAM_POLLING ?? "unset"})`,
+  );
   console.log(
     `[rss] toggles: FACEBOOK_ENABLED=${FACEBOOK_ENABLED} (FACEBOOK_ENABLED=${formatEnvValue(FACEBOOK_ENABLED_TOGGLE.primaryRaw)}, RSS_FACEBOOK_ENABLED=${formatEnvValue(FACEBOOK_ENABLED_TOGGLE.legacyRaw)}), INSTAGRAM_ENABLED=${INSTAGRAM_ENABLED} (INSTAGRAM_ENABLED=${formatEnvValue(INSTAGRAM_ENABLED_TOGGLE.primaryRaw)}, RSS_INSTAGRAM_ENABLED=${formatEnvValue(INSTAGRAM_ENABLED_TOGGLE.legacyRaw)})`,
   );

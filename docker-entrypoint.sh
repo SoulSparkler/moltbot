@@ -367,10 +367,11 @@ NODE
     fi
 
     # Start etsy-auto-post sidecar if the built artifact exists
+    # RSS_TELEGRAM_POLLING=false — only the gateway may poll Telegram to avoid 409 conflicts
     ETSY_ENTRY="/app/apps/etsy-auto-post/dist/index.js"
     if [ -f "$ETSY_ENTRY" ]; then
-        echo "[entrypoint] Starting etsy-auto-post sidecar (health server disabled, gateway owns PORT)"
-        RSS_DISABLE_HEALTH_SERVER=1 node "$ETSY_ENTRY" &
+        echo "[entrypoint] Starting etsy-auto-post sidecar (health server disabled, telegram polling disabled, gateway owns PORT)"
+        RSS_DISABLE_HEALTH_SERVER=1 RSS_TELEGRAM_POLLING=false node "$ETSY_ENTRY" &
     fi
 
     if [ "$(id -u)" -eq 0 ] && command -v su >/dev/null 2>&1; then
