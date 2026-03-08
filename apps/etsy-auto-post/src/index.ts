@@ -1,4 +1,5 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +12,16 @@ import {
   extractOgTitleFromHtml,
   toShareAndSaveUrl,
 } from "./lib/etsy.js";
+import {
+  sanitizeInstagramImageUrl,
+  validateInstagramImage,
+  probeImageDimensions,
+  isInstagramSafeAspectRatio,
+  padImageForInstagram,
+  storeTempImage,
+  getTempImage,
+  clearTempImage,
+} from "./lib/instagram-image.js";
 import { canonicalizeEtsyUrl, postFacebookPagePhoto } from "./lib/meta-facebook.js";
 import {
   fetchMePermissions,
@@ -63,6 +74,7 @@ const RSS_INSTAGRAM_POLL_TIMEOUT_MS = toNumberOrUndefined(
   process.env.RSS_INSTAGRAM_POLL_TIMEOUT_MS,
 );
 const RSS_INSTAGRAM_TEST_IMAGE_URL = process.env.RSS_INSTAGRAM_TEST_IMAGE_URL?.trim() ?? "";
+const PUBLIC_BASE_URL = resolvePublicBaseUrl();
 const PINTEREST_ACCESS_TOKEN = process.env.PINTEREST_ACCESS_TOKEN?.trim() ?? "";
 const PINTEREST_BOARD_ID = process.env.PINTEREST_BOARD_ID?.trim() ?? "";
 const PINTEREST_ENABLED_TOGGLE = resolveBooleanToggle("PINTEREST_ENABLED");
@@ -220,6 +232,14 @@ const BUILD_TIME_ENV_KEYS = [
 ];
 
 let resolvedBuildInfo: BuildInfo | null = null;
+
+function resolvePublicBaseUrl(): string | null {
+  const explicit = process.env.PUBLIC_BASE_URL?.trim();
+  if (explicit) {return explicit.replace(/\/+$/, "");}
+  const railwayDomain = process.env.RAILWAY_PUBLIC_DOMAIN?.trim();
+  if (railwayDomain) {return `https://${railwayDomain}`;}
+  return null;
+}
 
 function resolveStatePath(overrideRaw: string | undefined, fallback: string): string {
   const candidate = overrideRaw?.trim() || fallback;
@@ -2059,6 +2079,77 @@ async function postInstagramItem(params: {
     return { ok: false, attempted: false, igId, skippedReason: "image_missing" };
   }
 
+  // ── Instagram image validation & transformation ──────────────────────
+  const originalImageUrl = imageToUse.imageUrl;
+  const sanitizedImageUrl = sanitizeInstagramImageUrl(originalImageUrl);
+  const urlWasSanitized = sanitizedImageUrl !== originalImageUrl;
+
+  console.log(
+    `[rss][ig] image_url_sanitize listing=${params.candidate.listingId} original=${originalImageUrl} sanitized=${sanitizedImageUrl} changed=${urlWasSanitized}`,
+  );
+
+  let finalImageUrl = sanitizedImageUrl;
+  let tempImageId: string | null = null;
+  let probeWidth: number | null = null;
+  let probeHeight: number | null = null;
+  let probeRatio: number | null = null;
+  let probeFormat: string | null = null;
+  let imageTransformed = false;
+
+  try {
+    const probe = await probeImageDimensions(sanitizedImageUrl);
+    probeWidth = probe.width;
+    probeHeight = probe.height;
+    probeRatio = probe.aspectRatio;
+    probeFormat = probe.format;
+
+    console.log(
+      `[rss][ig] image_probe listing=${params.candidate.listingId} width=${probe.width} height=${probe.height} ratio=${probe.aspectRatio.toFixed(4)} format=${probe.format} bytes=${probe.byteLength}`,
+    );
+
+    const ratioSafe = isInstagramSafeAspectRatio(probe.width, probe.height);
+    if (!ratioSafe) {
+      console.log(
+        `[rss][ig] image_ratio_unsafe listing=${params.candidate.listingId} ratio=${probe.aspectRatio.toFixed(4)} (needs 0.80–1.91), attempting pad`,
+      );
+
+      const padded = await padImageForInstagram(probe.buffer, probe.width, probe.height);
+      if (padded && PUBLIC_BASE_URL) {
+        tempImageId = randomUUID();
+        storeTempImage(tempImageId, padded, "image/jpeg");
+        finalImageUrl = `${PUBLIC_BASE_URL}/ig-temp/${tempImageId}.jpg`;
+        imageTransformed = true;
+        console.log(
+          `[rss][ig] image_padded listing=${params.candidate.listingId} temp_id=${tempImageId} padded_bytes=${padded.length} serve_url=${finalImageUrl}`,
+        );
+      } else if (padded && !PUBLIC_BASE_URL) {
+        console.warn(
+          `[rss][ig] image_pad_no_serve listing=${params.candidate.listingId} reason=PUBLIC_BASE_URL_not_set (set PUBLIC_BASE_URL or RAILWAY_PUBLIC_DOMAIN to enable image padding)`,
+        );
+      } else {
+        console.warn(
+          `[rss][ig] image_pad_unavailable listing=${params.candidate.listingId} reason=sharp_not_installed`,
+        );
+      }
+    } else {
+      console.log(
+        `[rss][ig] image_ratio_ok listing=${params.candidate.listingId} ratio=${probe.aspectRatio.toFixed(4)}`,
+      );
+    }
+  } catch (probeErr) {
+    console.warn(
+      `[rss][ig] image_probe_failed listing=${params.candidate.listingId} error=${String(probeErr)} (proceeding with sanitized URL)`,
+    );
+  }
+
+  // Update imageToUse with sanitized/transformed URL
+  imageToUse = {
+    imageUrl: finalImageUrl,
+    imageSource: imageTransformed ? "padded" : imageSourceForLog ?? imageToUse.imageSource,
+    imageHost: urlHostOrNull(finalImageUrl),
+  };
+  imageSourceForLog = imageToUse.imageSource;
+
   const shareAndSaveUrl = buildShareAndSaveUrl(params.candidate.canonicalListingUrl, "instagram");
   // Instagram caption already includes hashtags and "link in bio" (built by buildInstagramCaption)
   const captionForPost = params.caption.captionText;
@@ -2072,6 +2163,14 @@ async function postInstagramItem(params: {
     igId,
     tokenSource: pageToken.source,
     tokenFingerprint: pageToken.fingerprint,
+    originalImageUrl,
+    finalImageUrl,
+    urlWasSanitized,
+    imageTransformed,
+    probeWidth,
+    probeHeight,
+    probeRatio: probeRatio !== null ? Number(probeRatio.toFixed(4)) : null,
+    probeFormat,
     imageHost: imageToUse.imageHost,
     imageSource: imageSourceForLog,
     captionSource: params.caption.captionSource,
@@ -2081,14 +2180,14 @@ async function postInstagramItem(params: {
   });
 
   console.log(
-    `[rss] STAGE=POST_INSTAGRAM attempt listing=${params.candidate.listingId} ig_id=${igId ?? "none"} image_host=${imageToUse.imageHost ?? "unknown"} caption_len=${captionForPost.length} shareUrl=${shareAndSaveUrl}`,
+    `[rss] STAGE=POST_INSTAGRAM attempt listing=${params.candidate.listingId} ig_id=${igId ?? "none"} image_host=${imageToUse.imageHost ?? "unknown"} final_image_url=${finalImageUrl} caption_len=${captionForPost.length} shareUrl=${shareAndSaveUrl}`,
   );
 
   try {
     const result = await publishInstagramPhoto({
       igUserId: instagramBusiness.id,
       accessToken: pageToken.token,
-      imageUrl: imageToUse.imageUrl,
+      imageUrl: finalImageUrl,
       caption: captionForPost,
       pollIntervalMs: RSS_INSTAGRAM_POLL_INTERVAL_MS ?? 2_000,
       pollTimeoutMs: RSS_INSTAGRAM_POLL_TIMEOUT_MS ?? 60_000,
@@ -2102,6 +2201,8 @@ async function postInstagramItem(params: {
       igId: result.igUserId,
       creationId: result.creationId,
       mediaId: result.mediaId,
+      finalImageUrl,
+      imageTransformed,
     });
 
     console.log(
@@ -2117,7 +2218,7 @@ async function postInstagramItem(params: {
     };
   } catch (error) {
     console.log(
-      `[publish] instagram error listing=${params.candidate.listingId} error=${String(error)}`,
+      `[publish] instagram error listing=${params.candidate.listingId} final_image_url=${finalImageUrl} error=${String(error)}`,
     );
     if (error instanceof MetaGraphRequestError) {
       logMeta("instagram_publish_failed", {
@@ -2128,6 +2229,12 @@ async function postInstagramItem(params: {
         igId,
         tokenSource: pageToken.source,
         tokenFingerprint: pageToken.fingerprint,
+        originalImageUrl,
+        finalImageUrl,
+        imageTransformed,
+        probeWidth,
+        probeHeight,
+        probeRatio: probeRatio !== null ? Number(probeRatio.toFixed(4)) : null,
         imageHost: imageToUse.imageHost,
         imageSource: imageSourceForLog,
         captionSource: params.caption.captionSource,
@@ -2153,6 +2260,12 @@ async function postInstagramItem(params: {
       shareAndSaveUrl,
       pageId: META_PAGE_ID,
       igId,
+      originalImageUrl,
+      finalImageUrl,
+      imageTransformed,
+      probeWidth,
+      probeHeight,
+      probeRatio: probeRatio !== null ? Number(probeRatio.toFixed(4)) : null,
       imageHost: imageToUse.imageHost,
       imageSource: imageSourceForLog,
       captionSource: params.caption.captionSource,
@@ -2161,6 +2274,11 @@ async function postInstagramItem(params: {
       error: String(error),
     });
     return { attempted: true, ok: false, igId, error };
+  } finally {
+    // Clean up any temp padded image from memory
+    if (tempImageId) {
+      clearTempImage(tempImageId);
+    }
   }
 }
 
@@ -3082,6 +3200,24 @@ async function main(): Promise<void> {
       if (url.pathname === "/health") {
         res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+      // Serve padded Instagram images from in-memory temp store
+      const igTempMatch = url.pathname.match(/^\/ig-temp\/([a-f0-9-]+)\.jpg$/);
+      if (igTempMatch) {
+        const tempId = igTempMatch[1]!;
+        const tempImg = getTempImage(tempId);
+        if (tempImg) {
+          res.writeHead(200, {
+            "content-type": tempImg.contentType,
+            "content-length": String(tempImg.buffer.length),
+            "cache-control": "no-store",
+          });
+          res.end(tempImg.buffer);
+        } else {
+          res.writeHead(404, { "content-type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ error: "not_found" }));
+        }
         return;
       }
       if (url.pathname === "/self-check") {

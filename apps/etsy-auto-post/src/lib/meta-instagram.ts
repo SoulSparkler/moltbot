@@ -482,6 +482,10 @@ async function createInstagramContainer(params: {
     ...(params.caption?.trim() ? { caption: params.caption.trim() } : {}),
   });
 
+  console.log(
+    `[meta][ig] create_container request ig_user=${params.igUserId} image_url=${params.imageUrl}`,
+  );
+
   const response = await fetchGraphWithInstagramPublishRetry(params.fetchImpl, {
     url,
     method: "POST",
@@ -490,6 +494,10 @@ async function createInstagramContainer(params: {
     contentType: "application/x-www-form-urlencoded",
     operation: "create_container",
   });
+
+  console.log(
+    `[meta][ig] create_container response status=${response.status} ok=${response.ok} body=${response.text.slice(0, 500)}`,
+  );
 
   if (!response.ok) {
     throw new MetaGraphRequestError({
@@ -510,6 +518,7 @@ async function createInstagramContainer(params: {
     });
   }
 
+  console.log(`[meta][ig] create_container ok creation_id=${creationId}`);
   return creationId;
 }
 
@@ -554,6 +563,11 @@ async function publishInstagramContainer(params: {
 }): Promise<string> {
   const url = `${META_GRAPH_API_BASE}/${encodeURIComponent(params.igUserId)}/media_publish`;
   const body = new URLSearchParams({ creation_id: params.creationId });
+
+  console.log(
+    `[meta][ig] publish_container request ig_user=${params.igUserId} creation_id=${params.creationId}`,
+  );
+
   const response = await fetchGraphWithInstagramPublishRetry(params.fetchImpl, {
     url,
     method: "POST",
@@ -562,6 +576,10 @@ async function publishInstagramContainer(params: {
     contentType: "application/x-www-form-urlencoded",
     operation: "publish_container",
   });
+
+  console.log(
+    `[meta][ig] publish_container response status=${response.status} ok=${response.ok} body=${response.text.slice(0, 500)}`,
+  );
 
   if (!response.ok) {
     throw new MetaGraphRequestError({
@@ -582,6 +600,7 @@ async function publishInstagramContainer(params: {
     });
   }
 
+  console.log(`[meta][ig] publish_container ok media_id=${mediaId}`);
   return mediaId;
 }
 
@@ -627,8 +646,13 @@ export async function publishInstagramPhoto(params: {
     const startedAt = Date.now();
     const timeoutMs = params.pollTimeoutMs ?? 60_000;
     const intervalMs = params.pollIntervalMs ?? 2_000;
+    let pollCount = 0;
     while (Date.now() - startedAt < timeoutMs) {
+      pollCount += 1;
       const status = await fetchContainerStatus({ fetchImpl, creationId, accessToken });
+      console.log(
+        `[meta][ig] container_poll creation_id=${creationId} poll=${pollCount} status=${status} elapsed_ms=${Date.now() - startedAt}`,
+      );
       if (status === "FINISHED") {
         break;
       }
