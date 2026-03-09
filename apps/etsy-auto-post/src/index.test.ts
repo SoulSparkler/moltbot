@@ -460,3 +460,208 @@ describe("stripEtsyShopSuffix", () => {
     expect(stripEtsyShopSuffix("Made by hand by TresorTendance")).toBe("Made by hand");
   });
 });
+
+// ─── PRODUCTION STABILITY TESTS ────────────────────────────────────────────
+
+describe("blank caption guard — captions must never be empty", () => {
+  const baseInfo = {
+    title: "Vintage Italian Ceramic Vase",
+    titleSource: "og_title" as const,
+    description: "Hand-painted ceramic vase from the 1960s.",
+    descriptionSource: "og_description" as const,
+    canonicalUrl: "https://tresortendance.etsy.com/listing/12345",
+  };
+  const shareUrl =
+    "https://tresortendance.etsy.com/listing/12345?utm_source=facebook&utm_medium=organic&utm_campaign=autopost";
+
+  it("Facebook caption is never empty for a listing with title", () => {
+    const result = buildFacebookCaption(baseInfo, shareUrl);
+    expect(result.captionText.trim().length).toBeGreaterThan(0);
+  });
+
+  it("Instagram caption is never empty for a listing with title", () => {
+    const result = buildInstagramCaption(baseInfo);
+    expect(result.captionText.trim().length).toBeGreaterThan(0);
+  });
+
+  it("Pinterest caption has non-empty title for a listing", () => {
+    const result = buildPinterestCaption(baseInfo, shareUrl);
+    expect(result.title.trim().length).toBeGreaterThan(0);
+  });
+
+  it("Facebook caption is not empty even when description is missing", () => {
+    const infoNoDesc = { ...baseInfo, description: "", descriptionSource: "none" as const };
+    const result = buildFacebookCaption(infoNoDesc, shareUrl);
+    expect(result.captionText.trim().length).toBeGreaterThan(0);
+    // Must contain at least title + CTA
+    expect(result.captionText).toContain(baseInfo.title);
+    expect(result.captionText).toContain("Shop it here:");
+  });
+
+  it("Instagram caption is not empty even when description is missing", () => {
+    const infoNoDesc = { ...baseInfo, description: "", descriptionSource: "none" as const };
+    const result = buildInstagramCaption(infoNoDesc);
+    expect(result.captionText.trim().length).toBeGreaterThan(0);
+    expect(result.captionText).toContain(baseInfo.title);
+  });
+});
+
+describe("one post per day — daily gate enforcement", () => {
+  it("blocks when one listing was already posted within 24 hours", () => {
+    const nowMs = Date.UTC(2025, 5, 15, 14, 0, 0);
+    const state = {
+      seenIds: [],
+      initialized: true,
+      telegramOffset: 0,
+      posted_listing_ids: {
+        "111": new Date(nowMs - 3 * 60 * 60 * 1000).toISOString(), // 3 hours ago
+      },
+    };
+    const result = shouldPostNow(state, nowMs, { maxPostsPerDay: 1 });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("daily_limit");
+  });
+
+  it("allows posting when no listing was posted in the last 24 hours", () => {
+    const nowMs = Date.UTC(2025, 5, 15, 14, 0, 0);
+    const state = {
+      seenIds: [],
+      initialized: true,
+      telegramOffset: 0,
+      posted_listing_ids: {
+        "111": new Date(nowMs - 25 * 60 * 60 * 1000).toISOString(), // 25 hours ago
+      },
+    };
+    const result = shouldPostNow(state, nowMs, { maxPostsPerDay: 1 });
+    expect(result.ok).toBe(true);
+  });
+
+  it("blocks ALL remaining items when gate is closed", () => {
+    const nowMs = Date.UTC(2025, 5, 15, 14, 0, 0);
+    const state = {
+      seenIds: [],
+      initialized: true,
+      telegramOffset: 0,
+      posted_listing_ids: {
+        "111": new Date(nowMs - 3 * 60 * 60 * 1000).toISOString(),
+      },
+    };
+    const gate = shouldPostNow(state, nowMs, { maxPostsPerDay: 1 });
+    expect(gate.ok).toBe(false);
+
+    const feedItems = [
+      { id: "https://www.etsy.com/listing/222/new", title: "New item", link: "https://www.etsy.com/listing/222/new" },
+      { id: "https://www.etsy.com/listing/333/another", title: "Another item", link: "https://www.etsy.com/listing/333/another" },
+    ];
+
+    const result = classifyFeedItems({ feedItems, state, gate, nowMs });
+    // With gate closed, all items should be gated
+    expect(result.eligibleCandidates).toHaveLength(0);
+    for (const d of result.decisions) {
+      expect(d.decision).toBe("SKIP");
+      expect(d.reason).toMatch(/^gated:/);
+    }
+  });
+});
+
+describe("listing ID extraction — deterministic and consistent", () => {
+  it("extracts listing ID from standard URL", () => {
+    expect(extractListingId("https://www.etsy.com/listing/1234567890/title")).toBe("1234567890");
+  });
+
+  it("extracts listing ID from localized Dutch URL", () => {
+    expect(extractListingId("https://www.etsy.com/nl/listing/1234567890/title")).toBe("1234567890");
+  });
+
+  it("extracts listing ID from shop-subdomain URL", () => {
+    expect(extractListingId("https://tresortendance.etsy.com/listing/1234567890")).toBe("1234567890");
+  });
+
+  it("returns same ID regardless of URL form", () => {
+    const urls = [
+      "https://www.etsy.com/listing/9876543210/title",
+      "https://www.etsy.com/nl/listing/9876543210/title?ref=rss",
+      "https://tresortendance.etsy.com/listing/9876543210?utm_source=facebook",
+    ];
+    const ids = urls.map(extractListingId);
+    expect(new Set(ids).size).toBe(1);
+    expect(ids[0]).toBe("9876543210");
+  });
+
+  it("returns null for non-listing URLs", () => {
+    expect(extractListingId("https://www.etsy.com/shop/TresorTendance")).toBeNull();
+    expect(extractListingId("")).toBeNull();
+    expect(extractListingId(null)).toBeNull();
+  });
+});
+
+describe("repost prevention — old listings must stay skipped", () => {
+  const nowMs = Date.UTC(2025, 5, 15, 12, 0, 0);
+
+  it("marks listing as duplicate when posted within dedupe window", () => {
+    const state = {
+      seenIds: [],
+      initialized: true,
+      telegramOffset: 0,
+      posted_listing_ids: {
+        "5555555": new Date(nowMs - 10 * 24 * 60 * 60 * 1000).toISOString(), // 10 days ago
+      },
+    };
+    expect(isDuplicate("5555555", state, nowMs, { dedupeWindowMs: 30 * 24 * 60 * 60 * 1000 })).toBe(true);
+  });
+
+  it("allows listing after dedupe window expires", () => {
+    const state = {
+      seenIds: [],
+      initialized: true,
+      telegramOffset: 0,
+      posted_listing_ids: {
+        "5555555": new Date(nowMs - 35 * 24 * 60 * 60 * 1000).toISOString(), // 35 days ago
+      },
+    };
+    expect(isDuplicate("5555555", state, nowMs, { dedupeWindowMs: 30 * 24 * 60 * 60 * 1000 })).toBe(false);
+  });
+
+  it("classifyFeedItems skips listings already in posted_listing_ids within window", () => {
+    const state = {
+      seenIds: [],
+      initialized: true,
+      telegramOffset: 0,
+      posted_listing_ids: {
+        "7777777": new Date(nowMs - 1 * 24 * 60 * 60 * 1000).toISOString(), // yesterday
+      },
+    };
+    const feedItems = [
+      {
+        id: "https://www.etsy.com/listing/7777777/old-item",
+        title: "Old item",
+        link: "https://www.etsy.com/listing/7777777/old-item",
+        publishedAtMs: nowMs - 7 * 24 * 60 * 60 * 1000,
+      },
+      {
+        id: "https://www.etsy.com/listing/8888888/new-item",
+        title: "New item",
+        link: "https://www.etsy.com/listing/8888888/new-item",
+        publishedAtMs: nowMs - 1 * 60 * 60 * 1000,
+      },
+    ];
+
+    const result = classifyFeedItems({ feedItems, state, gate: { ok: true }, nowMs });
+    // Old item should be skipped
+    expect(result.decisions.find((d) => d.listingId === "7777777")?.decision).toBe("SKIP");
+    expect(result.decisions.find((d) => d.listingId === "7777777")?.reason).toBe("dedupe_window");
+    // New item should be eligible
+    expect(result.eligibleCandidates.map((c) => c.listingId)).toContain("8888888");
+  });
+
+  it("does not allow the same listing to appear twice in eligibleCandidates", () => {
+    const state = { seenIds: [], initialized: true, telegramOffset: 0 };
+    const feedItems = [
+      { id: "https://www.etsy.com/listing/4444444/a", title: "Item A", link: "https://www.etsy.com/listing/4444444/a" },
+      { id: "https://www.etsy.com/listing/4444444/b", title: "Item A (dupe)", link: "https://www.etsy.com/listing/4444444/b" },
+    ];
+    const result = classifyFeedItems({ feedItems, state, gate: { ok: true }, nowMs });
+    const eligibleIds = result.eligibleCandidates.map((c) => c.listingId);
+    expect(eligibleIds.filter((id) => id === "4444444")).toHaveLength(1);
+  });
+});

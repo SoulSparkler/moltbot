@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
@@ -836,6 +836,7 @@ type PlatformCaptions = {
   facebook: CaptionBuildResult;
   instagram: CaptionBuildResult;
   pinterest: { title: string; description: string; captionSource: string; langDetected: "en" | "nl"; translationApplied: boolean };
+  listingTitle: string;
 };
 
 type ResolvedImage = {
@@ -1165,6 +1166,7 @@ async function buildPlatformCaptions(params: {
     facebook: buildFacebookCaption(info, fbShareUrl),
     instagram: buildInstagramCaption(info),
     pinterest: buildPinterestCaption(info, pinShareUrl),
+    listingTitle: info.title,
   };
 }
 
@@ -1362,36 +1364,37 @@ async function saveState(state: WatcherState): Promise<void> {
       ? new Date(Date.parse(state.last_attempted_post_at)).toISOString()
       : undefined;
 
-  await mkdir(dirname(STATE_PATH), { recursive: true });
-  await writeFile(
-    STATE_PATH,
-    JSON.stringify(
-      {
-        ...state,
-        ...(normalizedLastRotationAt ? { last_rotation_at: normalizedLastRotationAt } : {}),
-        ...(normalizedLastPostedId ? { last_posted_id: normalizedLastPostedId } : {}),
-        ...(normalizedPostedAtById ? { posted_at_by_id: normalizedPostedAtById } : {}),
-        ...(normalizedLastSuccessfulPostAt
-          ? { last_successful_post_at: normalizedLastSuccessfulPostAt }
-          : {}),
-        ...(normalizedLastSuccessfulFbPostAt
-          ? { last_successful_fb_post_at: normalizedLastSuccessfulFbPostAt }
-          : {}),
-        ...(normalizedLastSuccessfulIgPostAt
-          ? { last_successful_ig_post_at: normalizedLastSuccessfulIgPostAt }
-          : {}),
-        ...(normalizedLastAttemptedPostAt
-          ? { last_attempted_post_at: normalizedLastAttemptedPostAt }
-          : {}),
-        ...(normalizedPostedListingIds ? { posted_listing_ids: normalizedPostedListingIds } : {}),
-        seenIds: state.seenIds.slice(0, MAX_SEEN_IDS),
-        igFailedIds: state.igFailedIds?.slice(0, MAX_SEEN_IDS) ?? [],
-      },
-      null,
-      2,
-    ),
-    "utf8",
+  const stateDir = dirname(STATE_PATH);
+  await mkdir(stateDir, { recursive: true });
+  const serialized = JSON.stringify(
+    {
+      ...state,
+      ...(normalizedLastRotationAt ? { last_rotation_at: normalizedLastRotationAt } : {}),
+      ...(normalizedLastPostedId ? { last_posted_id: normalizedLastPostedId } : {}),
+      ...(normalizedPostedAtById ? { posted_at_by_id: normalizedPostedAtById } : {}),
+      ...(normalizedLastSuccessfulPostAt
+        ? { last_successful_post_at: normalizedLastSuccessfulPostAt }
+        : {}),
+      ...(normalizedLastSuccessfulFbPostAt
+        ? { last_successful_fb_post_at: normalizedLastSuccessfulFbPostAt }
+        : {}),
+      ...(normalizedLastSuccessfulIgPostAt
+        ? { last_successful_ig_post_at: normalizedLastSuccessfulIgPostAt }
+        : {}),
+      ...(normalizedLastAttemptedPostAt
+        ? { last_attempted_post_at: normalizedLastAttemptedPostAt }
+        : {}),
+      ...(normalizedPostedListingIds ? { posted_listing_ids: normalizedPostedListingIds } : {}),
+      seenIds: state.seenIds.slice(0, MAX_SEEN_IDS),
+      igFailedIds: state.igFailedIds?.slice(0, MAX_SEEN_IDS) ?? [],
+    },
+    null,
+    2,
   );
+  // Atomic write: write to temp file first, then rename — prevents partial/corrupt state on crash.
+  const tempPath = `${STATE_PATH}.tmp`;
+  await writeFile(tempPath, serialized, "utf8");
+  await rename(tempPath, STATE_PATH);
 }
 
 function alertsEnabled(): boolean {
@@ -1740,6 +1743,52 @@ async function sendTelegramText(text: string): Promise<boolean> {
   }
 
   return true;
+}
+
+async function sendTelegramPostSummary(params: {
+  listingId: string;
+  listingTitle: string;
+  canonicalUrl: string;
+  facebook: { attempted: boolean; ok: boolean };
+  instagram: { attempted: boolean; ok: boolean };
+  pinterest: { attempted: boolean; ok: boolean };
+  nowMs: number;
+}): Promise<void> {
+  if (!alertsEnabled()) {
+    return;
+  }
+
+  const fbLine = params.facebook.attempted
+    ? params.facebook.ok
+      ? "Facebook: success"
+      : "Facebook: FAILED"
+    : "Facebook: skipped";
+  const igLine = params.instagram.attempted
+    ? params.instagram.ok
+      ? "Instagram: success"
+      : "Instagram: FAILED"
+    : "Instagram: skipped";
+  const pinLine = params.pinterest.attempted
+    ? params.pinterest.ok
+      ? "Pinterest: success"
+      : "Pinterest: FAILED"
+    : "Pinterest: skipped";
+
+  const timestamp = new Date(params.nowMs).toISOString().slice(0, 16).replace("T", " ") + " UTC";
+
+  const text = [
+    "Jannetje update:",
+    `Listing: ${params.listingTitle}`,
+    `Listing ID: ${params.listingId}`,
+    `Etsy: ${params.canonicalUrl}`,
+    fbLine,
+    igLine,
+    pinLine,
+    `Time: ${timestamp}`,
+  ].join("\n");
+
+  const ok = await sendTelegramText(text);
+  console.log(`[rss] STAGE=TELEGRAM_NOTIFY listing=${params.listingId} ok=${ok}`);
 }
 
 async function postFacebookItem(params: {
@@ -2855,9 +2904,40 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
         listingHtml,
       });
 
-      const fbResult = await postFacebookItem({ candidate: selected, caption: captions.facebook, image });
-      const igResult = await postInstagramItem({ candidate: selected, caption: captions.instagram, image });
-      const pinResult = await postPinterestItem({ candidate: selected, caption: captions.pinterest, image });
+      // Hard gate: never publish a blank caption. If caption is empty, skip that platform and log.
+      const fbCaptionText = captions.facebook.captionText.trim();
+      const igCaptionText = captions.instagram.captionText.trim();
+      const pinCaptionOk =
+        captions.pinterest.title.trim().length > 0 ||
+        captions.pinterest.description.trim().length > 0;
+
+      if (!fbCaptionText) {
+        console.log(
+          `[publish] BLANK_CAPTION_ABORT platform=facebook listing=${selected.listingId} caption_len=0 — skipping facebook to prevent blank post`,
+        );
+      }
+      if (!igCaptionText) {
+        console.log(
+          `[publish] BLANK_CAPTION_ABORT platform=instagram listing=${selected.listingId} caption_len=0 — skipping instagram to prevent blank post`,
+        );
+      }
+      if (!pinCaptionOk) {
+        console.log(
+          `[publish] BLANK_CAPTION_ABORT platform=pinterest listing=${selected.listingId} title_len=0 desc_len=0 — skipping pinterest to prevent blank post`,
+        );
+      }
+
+      const fbResult: PublishResult = fbCaptionText
+        ? await postFacebookItem({ candidate: selected, caption: captions.facebook, image })
+        : { attempted: false, ok: false, skippedReason: "blank_caption" };
+
+      const igResult: PublishResult & { igId: string | null } = igCaptionText
+        ? await postInstagramItem({ candidate: selected, caption: captions.instagram, image })
+        : { attempted: false, ok: false, igId: null, skippedReason: "blank_caption" };
+
+      const pinResult: PublishResult & { pinId: string | null } = pinCaptionOk
+        ? await postPinterestItem({ candidate: selected, caption: captions.pinterest, image })
+        : { attempted: false, ok: false, pinId: null, skippedReason: "blank_caption" };
 
       const attemptedAny = fbResult.attempted || igResult.attempted || pinResult.attempted;
       if (attemptedAny) {
@@ -2932,6 +3012,19 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
         new Set([selected.id, ...currentState.seenIds].filter(Boolean)),
       ).slice(0, MAX_SEEN_IDS);
       await saveState(currentState);
+
+      // Telegram notification: send after state is persisted, whenever any platform was attempted.
+      if (attemptedAny) {
+        await sendTelegramPostSummary({
+          listingId: selected.listingId,
+          listingTitle: captions.listingTitle,
+          canonicalUrl: selected.canonicalListingUrl,
+          facebook: { attempted: fbResult.attempted, ok: fbResult.ok },
+          instagram: { attempted: igResult.attempted, ok: igResult.ok },
+          pinterest: { attempted: pinResult.attempted, ok: pinResult.ok },
+          nowMs,
+        });
+      }
     }
 
     console.log(
