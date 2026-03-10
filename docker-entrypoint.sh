@@ -259,11 +259,11 @@ if (cfg.browser && cfg.browser.profiles) {
 }
 
 // Agent model config
-// Defaults favor a pinned OpenRouter muscle model. Anthropic Opus stays reserved for the Brain pipeline.
+// Defaults favor the OpenRouter auto-router; Anthropic Opus stays reserved for the Brain pipeline.
 cfg.agents = cfg.agents || {};
 cfg.agents.defaults = cfg.agents.defaults || {};
 
-const primaryModel = (process.env.OPENCLAW_PRIMARY_MODEL || 'openrouter/moonshotai/kimi-k2').trim();
+const primaryModel = (process.env.OPENCLAW_PRIMARY_MODEL || 'openrouter/auto').trim();
 const fallbacksRaw = (process.env.OPENCLAW_FALLBACK_MODELS || '').trim();
 const fallbackModels = fallbacksRaw
   ? fallbacksRaw
@@ -271,6 +271,13 @@ const fallbackModels = fallbacksRaw
       .map((s) => s.trim())
       .filter(Boolean)
   : [];
+
+// Cap completion size by default to avoid OpenRouter credit errors; override via OPENCLAW_MAX_TOKENS or
+// OPENCLAW_PRIMARY_MAX_TOKENS. Applied only when the model entry lacks a max_tokens param.
+const primaryMaxTokensEnv =
+  process.env.OPENCLAW_PRIMARY_MAX_TOKENS || process.env.OPENCLAW_MAX_TOKENS || '';
+const parsedPrimaryMaxTokens = Number.parseInt(primaryMaxTokensEnv, 10);
+const defaultMaxTokens = Number.isFinite(parsedPrimaryMaxTokens) ? parsedPrimaryMaxTokens : 1000;
 
 cfg.agents.defaults.model = {
   primary: primaryModel,
@@ -309,17 +316,43 @@ for (const ref of [
   }
 }
 
+const ensureMaxTokensCap = (ref) => {
+  if (typeof ref !== 'string') return;
+  const trimmed = ref.trim();
+  if (!trimmed) return;
+  // Only apply to OpenRouter models when no explicit cap is present.
+  if (!trimmed.startsWith('openrouter/')) return;
+  const entry = cfg.agents.defaults.models[trimmed] || {};
+  const params = entry.params || {};
+  if (params.max_tokens == null) {
+    params.max_tokens = defaultMaxTokens;
+  }
+  entry.params = params;
+  cfg.agents.defaults.models[trimmed] = entry;
+};
+
+for (const ref of [
+  primaryModel,
+  ...(cfg.agents.defaults.model.fallbacks || []),
+  cfg.agents.defaults.replyPipeline.brainModel,
+  ...(cfg.agents.defaults.replyPipeline.muscleModels || []),
+]) {
+  ensureMaxTokensCap(ref);
+}
+
 const muscleModels = cfg.agents.defaults.replyPipeline.muscleModels || [];
 const muscleList = muscleModels.length > 0 ? muscleModels.join(', ') : primaryModel;
 const fallbackLabel = fallbackModels.length > 0 ? fallbackModels.join(', ') : 'none';
 const openRouterKeyState = process.env.OPENROUTER_API_KEY?.trim() ? 'set' : 'missing';
 const anthropicKeyState = process.env.ANTHROPIC_API_KEY?.trim() ? 'set' : 'missing';
+const openRouterMaxTokensLabel = defaultMaxTokens;
 console.log(
   `[entrypoint] Model defaults: primary=${primaryModel} fallbacks=${fallbackLabel}`,
 );
 console.log(
   `[entrypoint] Pipeline models: brain=${cfg.agents.defaults.replyPipeline.brainModel} muscle=${muscleList}`,
 );
+console.log(`[entrypoint] OpenRouter max_tokens cap=${openRouterMaxTokensLabel}`);
 console.log(
   `[entrypoint] API keys: OPENROUTER_API_KEY=${openRouterKeyState} ANTHROPIC_API_KEY=${anthropicKeyState}`,
 );
