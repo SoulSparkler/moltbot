@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find c:/dev/moltbot -name *.yaml -o -name *.yml)",
+      "Bash(find c:/dev/moltbot -name jannetje* -not -path *node_modules*)",
+      "Read(//c/Users/baboe/.openclaw/**)",
+      "Read(//c/Users/baboe/AppData/Roaming/**)",
+      "Read(//c/Users/baboe/AppData/Local/**)",
+      "Bash(grep -r \"thinkingLevel\\\\|thinkingBudget\\\\|maxTokens\\\\|30000\" c:/dev/moltbot/node_modules/@mariozechner/pi-coding-agent/dist --include=*.js -n)"
+    ]
+  }
+}
