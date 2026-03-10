@@ -39,6 +39,15 @@
 - The route returns `429` after the first request in a process to avoid spamming; redeploy/restart to rerun if needed.
 - After verification, remove/unset `PINTEREST_TEST_MODE` (and any temporary creds) so the route is disabled.
 
+## Scope and chat expectations
+
+- The Etsy autopost sidecar in `apps/etsy-auto-post` stays separate from chat. Publishing still lives in the sidecar; the chat agent does not post for you.
+- The chat agent `jannetje` is now defined in `~/.openclaw/openclaw.json` with workspace `~/.openclaw/workspace-jannetje`; main session key: `agent:jannetje:main`.
+- Provider/model: `openrouter/moonshotai/kimi-k2` (OpenRouter). Set `OPENROUTER_API_KEY` before running the gateway; without it the Control UI will show a billing/authorization error.
+- Control UI smoke test: pick agent “Jannetje” (or session `agent:jannetje:main`) and ask “Who are you?” — expect the new identity reply, not a provider error.
+- Sidecar env stays unchanged (`ETSY_SHOP_RSS_URL`, `META_*`, etc.); keep chat creds separate. Telegram in this service remains outbound-only for status/health pings.
+- Optional: OpenRouter onboarding flow also works (`openclaw onboard --auth-choice apiKey --token-provider openrouter --token "$OPENROUTER_API_KEY"`).
+
 ## Notes
 
 - The gateway Docker entrypoint no longer launches the RSS watcher sidecar; use the `railway.json` commands above as the single deployment path for Etsy autoposting.
