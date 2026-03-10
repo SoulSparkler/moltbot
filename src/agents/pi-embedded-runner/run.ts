@@ -707,6 +707,11 @@ export async function runEmbeddedPiAgent(
           const authFailure = isAuthAssistantError(lastAssistant);
           const rateLimitFailure = isRateLimitAssistantError(lastAssistant);
           const billingFailure = isBillingAssistantError(lastAssistant);
+          if (billingFailure) {
+            log.warn(
+              `[billing-debug] raw errorMessage from ${provider}/${modelId}: ${JSON.stringify(lastAssistant?.errorMessage)}`,
+            );
+          }
           const failoverFailure = isFailoverAssistantError(lastAssistant);
           const assistantFailoverReason = classifyFailoverReason(lastAssistant?.errorMessage ?? "");
           const cloudCodeAssistFormatError = attempt.cloudCodeAssistFormatError;
