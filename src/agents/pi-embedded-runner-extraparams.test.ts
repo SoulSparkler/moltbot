@@ -91,4 +91,41 @@ describe("applyExtraParamsToAgent", () => {
       "X-Custom": "1",
     });
   });
+
+  it("maps snake_case max_tokens to maxTokens option", () => {
+    const calls: Array<SimpleStreamOptions | undefined> = [];
+    const baseStreamFn: StreamFn = (_model, _context, options) => {
+      calls.push(options);
+      return new AssistantMessageEventStream();
+    };
+    const agent = { streamFn: baseStreamFn };
+
+    applyExtraParamsToAgent(
+      agent,
+      {
+        agents: {
+          defaults: {
+            models: {
+              "openrouter/auto": {
+                params: { max_tokens: 777 },
+              },
+            },
+          },
+        },
+      },
+      "openrouter",
+      "openrouter/auto",
+    );
+
+    const model = {
+      api: "openai-completions",
+      provider: "openrouter",
+      id: "openrouter/auto",
+    } as Model<"openai-completions">;
+    const context: Context = { messages: [] };
+
+    void agent.streamFn?.(model, context, {});
+
+    expect(calls[0]?.maxTokens).toBe(777);
+  });
 });

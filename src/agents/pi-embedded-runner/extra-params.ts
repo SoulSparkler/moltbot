@@ -77,8 +77,20 @@ function createStreamFnWithExtraParams(
   if (typeof extraParams.temperature === "number") {
     streamParams.temperature = extraParams.temperature;
   }
-  if (typeof extraParams.maxTokens === "number") {
-    streamParams.maxTokens = extraParams.maxTokens;
+  const snakeCaseMaxTokens =
+    typeof (extraParams as { max_tokens?: unknown }).max_tokens === "number"
+      ? (extraParams as { max_tokens: number }).max_tokens
+      : typeof (extraParams as { max_completion_tokens?: unknown }).max_completion_tokens ===
+          "number"
+        ? (extraParams as { max_completion_tokens: number }).max_completion_tokens
+        : undefined;
+  const camelCaseMaxTokens =
+    typeof (extraParams as { maxTokens?: unknown }).maxTokens === "number"
+      ? (extraParams as { maxTokens: number }).maxTokens
+      : undefined;
+  const resolvedMaxTokens = camelCaseMaxTokens ?? snakeCaseMaxTokens;
+  if (typeof resolvedMaxTokens === "number") {
+    streamParams.maxTokens = resolvedMaxTokens;
   }
   const cacheRetention = resolveCacheRetention(extraParams, provider);
   if (cacheRetention) {
