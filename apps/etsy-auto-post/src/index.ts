@@ -4,6 +4,15 @@ import { createServer } from "node:http";
 import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  databaseUrlPresent,
+  ensureSchema,
+  loadPostingHistorySnapshot,
+  recordFeedItem,
+  recordPostSuccess,
+  type PostingHistorySnapshot,
+  type PostingPlatform,
+} from "./db.js";
+import {
   extractEtsyListingImageUrlFromHtml,
   extractEtsyRssImageUrl,
   extractJsonLdDescriptionFromHtml,
@@ -35,6 +44,7 @@ import {
 
 const SERVICE_NAME = "etsy-auto-post";
 const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 const TELEGRAM_POLL_TIMEOUT_SECONDS = 25;
 const MAX_SEEN_IDS = 500;
 const DEFAULT_STATE_PATH = "/data/.openclaw/state/etsy_rss.json";
@@ -189,6 +199,9 @@ let currentState: WatcherState = {
   initialized: false,
   telegramOffset: 0,
 };
+let dbReady = false;
+let dbError: string | null = null;
+let postingSnapshot: PostingHistorySnapshot | null = null;
 let checkInFlight: Promise<void> | null = null;
 let queuedManualRun = false;
 let pinterestTestTriggered = false;
@@ -1397,6 +1410,76 @@ async function saveState(state: WatcherState): Promise<void> {
   await rename(tempPath, STATE_PATH);
 }
 
+async function ensureDatabaseReady(): Promise<boolean> {
+  if (!databaseUrlPresent()) {
+    dbReady = false;
+    dbError = "DATABASE_URL missing";
+    console.log(
+      "[db] DATABASE_URL is missing; PostgreSQL-backed dedupe disabled and posting paused to avoid duplicates.",
+    );
+    return false;
+  }
+
+  try {
+    await ensureSchema();
+    if (!dbReady) {
+      console.log("[db] PostgreSQL connected and schema ensured.");
+    }
+    dbReady = true;
+    dbError = null;
+    return true;
+  } catch (error) {
+    dbReady = false;
+    dbError = String(error);
+    console.log(`[db] PostgreSQL unavailable: ${dbError}`);
+    return false;
+  }
+}
+
+async function refreshPostingSnapshot(nowMs: number): Promise<void> {
+  if (!dbReady) {
+    postingSnapshot = null;
+    return;
+  }
+  try {
+    postingSnapshot = await loadPostingHistorySnapshot({
+      nowMs,
+      dedupeWindowMs: DEDUPE_WINDOW_MS,
+    });
+    applySnapshotToState(postingSnapshot);
+  } catch (error) {
+    postingSnapshot = null;
+    dbReady = false;
+    dbError = String(error);
+    console.log(`[db] failed to load posting snapshot: ${dbError}`);
+  }
+}
+
+async function persistPostSuccess(params: {
+  listingId: string;
+  platform: PostingPlatform;
+  link: string;
+  title: string;
+  postedAtIso: string;
+}): Promise<void> {
+  try {
+    await recordPostSuccess({
+      listingId: params.listingId,
+      platform: params.platform,
+      link: params.link,
+      title: params.title,
+      postedAt: new Date(params.postedAtIso),
+    });
+  } catch (error) {
+    dbReady = false;
+    dbError = String(error);
+    console.log(
+      `[db] record_post_failed platform=${params.platform} listing=${params.listingId} error=${dbError}`,
+    );
+    throw error;
+  }
+}
+
 function alertsEnabled(): boolean {
   if (alertsEnabledMemo !== null) {
     return alertsEnabledMemo;
@@ -1592,7 +1675,7 @@ export function shouldPostNow(
   const lastSuccessMs = parseIsoTimestampMs(state.last_successful_post_at);
   const postsInWindow = Object.values(state.posted_listing_ids ?? {}).filter((iso) => {
     const parsed = parseIsoTimestampMs(iso);
-    return parsed != null && nowMs - parsed < 24 * 60 * 60 * 1000;
+    return parsed != null && nowMs - parsed < ONE_DAY_MS;
   }).length;
 
   if (postsInWindow >= maxPerDay) {
@@ -1605,6 +1688,138 @@ export function shouldPostNow(
   }
 
   return { ok: true };
+}
+
+function enabledPlatforms(): PostingPlatform[] {
+  const platforms: PostingPlatform[] = [];
+  const fbStatus = resolveFacebookEnablement();
+  if (fbStatus.enabled) {
+    platforms.push("facebook");
+  }
+  if (INSTAGRAM_ENABLED) {
+    platforms.push("instagram");
+  }
+  if (resolvePinterestEnablement()) {
+    platforms.push("pinterest");
+  }
+  return platforms;
+}
+
+function applySnapshotToState(snapshot: PostingHistorySnapshot | null): void {
+  if (!snapshot) {
+    return;
+  }
+  if (snapshot.perListingLatest.size > 0) {
+    currentState.posted_listing_ids = Object.fromEntries(snapshot.perListingLatest.entries());
+  }
+  if (snapshot.latestOverall) {
+    currentState.last_successful_post_at = snapshot.latestOverall;
+  }
+  if (snapshot.perPlatformLatest.facebook) {
+    currentState.last_successful_fb_post_at = snapshot.perPlatformLatest.facebook;
+  }
+  if (snapshot.perPlatformLatest.instagram) {
+    currentState.last_successful_ig_post_at = snapshot.perPlatformLatest.instagram;
+  }
+  if (snapshot.perPlatformLatest.pinterest) {
+    currentState.last_successful_pin_post_at = snapshot.perPlatformLatest.pinterest;
+  }
+}
+
+function listingFullyPostedWithinWindow(params: {
+  listingId: string;
+  snapshot: PostingHistorySnapshot | null;
+  platforms: PostingPlatform[];
+  nowMs: number;
+  dedupeWindowMs: number;
+}): { duplicate: boolean; lastPostedAt: string | null } {
+  if (!params.snapshot || params.platforms.length === 0) {
+    return { duplicate: false, lastPostedAt: null };
+  }
+  // A listing counts as a duplicate only if EVERY enabled platform has a recent post.
+  const platformMap = params.snapshot.perListingPlatform.get(params.listingId);
+  if (!platformMap) {
+    return { duplicate: false, lastPostedAt: null };
+  }
+
+  let latest: string | null = null;
+  for (const platform of params.platforms) {
+    const postedIso = platformMap.get(platform);
+    if (!postedIso) {
+      return { duplicate: false, lastPostedAt: null };
+    }
+    const postedMs = Date.parse(postedIso);
+    if (!Number.isFinite(postedMs) || params.nowMs - postedMs >= params.dedupeWindowMs) {
+      return { duplicate: false, lastPostedAt: null };
+    }
+    if (!latest || Date.parse(postedIso) > Date.parse(latest)) {
+      latest = postedIso;
+    }
+  }
+
+  return { duplicate: true, lastPostedAt: latest };
+}
+
+function hasRecentPlatformPost(params: {
+  listingId: string;
+  platform: PostingPlatform;
+  nowMs: number;
+  snapshot: PostingHistorySnapshot | null;
+  dedupeWindowMs: number;
+}): string | null {
+  if (!params.snapshot) {
+    return null;
+  }
+  const postedIso = params.snapshot.perListingPlatform.get(params.listingId)?.get(params.platform);
+  if (!postedIso) {
+    return null;
+  }
+  const postedMs = Date.parse(postedIso);
+  if (!Number.isFinite(postedMs)) {
+    return null;
+  }
+  return params.nowMs - postedMs < params.dedupeWindowMs ? postedIso : null;
+}
+
+function platformHasDailyBudget(
+  snapshot: PostingHistorySnapshot | null,
+  platform: PostingPlatform,
+  maxPerDay: number,
+): boolean {
+  if (!snapshot) {
+    return false;
+  }
+  return (snapshot.perPlatform24hCount[platform] ?? 0) < maxPerDay;
+}
+
+function updateSnapshotAfterSuccess(params: {
+  snapshot: PostingHistorySnapshot | null;
+  listingId: string;
+  platform: PostingPlatform;
+  postedAtIso: string;
+}): void {
+  if (!params.snapshot) {
+    return;
+  }
+  const { snapshot, listingId, platform, postedAtIso } = params;
+  let platformMap = snapshot.perListingPlatform.get(listingId);
+  if (!platformMap) {
+    platformMap = new Map<PostingPlatform, string>();
+    snapshot.perListingPlatform.set(listingId, platformMap);
+  }
+  platformMap.set(platform, postedAtIso);
+  snapshot.perListingLatest.set(listingId, postedAtIso);
+  const postedMs = Date.parse(postedAtIso);
+  if (Number.isFinite(postedMs) && Date.now() - postedMs < ONE_DAY_MS) {
+    snapshot.perPlatform24hCount[platform] = (snapshot.perPlatform24hCount[platform] ?? 0) + 1;
+  }
+  const latestForPlatform = snapshot.perPlatformLatest[platform];
+  if (!latestForPlatform || Date.parse(postedAtIso) > Date.parse(latestForPlatform)) {
+    snapshot.perPlatformLatest[platform] = postedAtIso;
+  }
+  if (!snapshot.latestOverall || Date.parse(postedAtIso) > Date.parse(snapshot.latestOverall)) {
+    snapshot.latestOverall = postedAtIso;
+  }
 }
 
 export function isDuplicate(
@@ -2706,6 +2921,28 @@ export function classifyFeedItems(params: {
 async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<void> {
   await runMetaHealthcheck();
 
+  const dbOk = await ensureDatabaseReady();
+  if (!dbOk) {
+    console.log(
+      `[rss] STAGE=DB_CHECK result=BLOCKED reason=${dbError ?? "db_unavailable"} trigger=${trigger}`,
+    );
+    lastRunSummary = {
+      at: Date.now(),
+      trigger,
+      fetched: 0,
+      inspected: 0,
+      newItems: 0,
+      selectedListingId: null,
+      gate: { ok: false, reason: "db_unavailable" },
+      ignoreDedupe: IGNORE_DEDUPE,
+      lastSuccessfulPostAt: currentState.last_successful_post_at,
+      lastAttemptedPostAt: currentState.last_attempted_post_at,
+      postedCount: 0,
+      posted: { facebook: false, instagram: false, pinterest: false },
+    };
+    return;
+  }
+
   if (!ETSY_SHOP_RSS_URL) {
     if (trigger === "startup") {
       console.log("[rss] ETSY_SHOP_RSS_URL is missing; watcher idle.");
@@ -2738,15 +2975,66 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
       return;
     }
 
+    const nowMs = Date.now();
+    await refreshPostingSnapshot(nowMs);
+    if (!dbReady || !postingSnapshot) {
+      console.log(
+        `[rss] STAGE=DB_SNAPSHOT result=BLOCKED reason=${dbError ?? "snapshot_missing"} trigger=${trigger}`,
+      );
+      lastRunSummary = {
+        at: nowMs,
+        trigger,
+        fetched: items.length,
+        inspected: 0,
+        newItems: 0,
+        selectedListingId: null,
+        gate: { ok: false, reason: "db_snapshot_unavailable" },
+        ignoreDedupe: IGNORE_DEDUPE,
+        lastSuccessfulPostAt: currentState.last_successful_post_at,
+        lastAttemptedPostAt: currentState.last_attempted_post_at,
+        postedCount: 0,
+        posted: { facebook: false, instagram: false, pinterest: false },
+      };
+      return;
+    }
+
     if (!currentState.initialized) {
       currentState.initialized = true;
       currentState.seenIds = [];
     }
 
-    const nowMs = Date.now();
+    const platforms = enabledPlatforms();
+    const feedItemRecords: Array<Promise<void>> = [];
+
+    for (const item of items) {
+      const candidate = toListingCandidate(item);
+      if (!candidate) {
+        continue;
+      }
+
+      console.log(
+        `[db] item_discovered listing=${candidate.listingId} guid=${item.id ?? "n/a"} published=${item.publishedAt ?? "unknown"}`,
+      );
+      feedItemRecords.push(
+        recordFeedItem({
+          listingId: candidate.listingId,
+          guid: item.id,
+          link: item.link,
+          title: item.title,
+          publishedAt: item.publishedAt,
+        }).catch((error) => {
+          console.log(`[db] record_feed_item_failed listing=${candidate.listingId} error=${String(error)}`);
+        }),
+      );
+    }
+
+    if (feedItemRecords.length > 0) {
+      await Promise.all(feedItemRecords);
+    }
+
     const todayCount = Object.values(currentState.posted_listing_ids ?? {}).filter((iso) => {
       const parsed = parseIsoTimestampMs(iso);
-      return parsed != null && nowMs - parsed < 24 * 60 * 60 * 1000;
+      return parsed != null && nowMs - parsed < ONE_DAY_MS;
     }).length;
     const gate = shouldPostNow(currentState, nowMs);
     if (!gate.ok) {
@@ -2781,9 +3069,10 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
       return;
     }
 
+    const classificationState = { ...currentState, posted_listing_ids: {} };
     const classification = classifyFeedItems({
       feedItems: items,
-      state: currentState,
+      state: classificationState,
       gate,
       nowMs,
       ignoreDedupe: IGNORE_DEDUPE,
@@ -2927,21 +3216,164 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
         );
       }
 
-      const fbResult: PublishResult = fbCaptionText
-        ? await postFacebookItem({ candidate: selected, caption: captions.facebook, image })
-        : { attempted: false, ok: false, skippedReason: "blank_caption" };
+      let fbResult: PublishResult = { attempted: false, ok: false, skippedReason: "blank_caption" };
+      let igResult: PublishResult & { igId: string | null } = {
+        attempted: false,
+        ok: false,
+        igId: null,
+        skippedReason: "blank_caption",
+      };
+      let pinResult: PublishResult & { pinId: string | null } = {
+        attempted: false,
+        ok: false,
+        pinId: null,
+        skippedReason: "blank_caption",
+      };
 
-      const igResult: PublishResult & { igId: string | null } = igCaptionText
-        ? await postInstagramItem({ candidate: selected, caption: captions.instagram, image })
-        : { attempted: false, ok: false, igId: null, skippedReason: "blank_caption" };
+      if (fbCaptionText) {
+        const fbDuplicateIso = hasRecentPlatformPost({
+          listingId: selected.listingId,
+          platform: "facebook",
+          nowMs,
+          snapshot: postingSnapshot,
+          dedupeWindowMs: DEDUPE_WINDOW_MS,
+        });
+        const fbBudgetOk = platformHasDailyBudget(postingSnapshot, "facebook", MAX_POSTS_PER_DAY);
+        if (fbDuplicateIso) {
+          console.log(
+            `[db] duplicate_found platform=facebook listing=${selected.listingId} posted_at=${fbDuplicateIso} -- skipping`,
+          );
+          fbResult = { attempted: false, ok: false, skippedReason: "duplicate_recent" };
+        } else if (!fbBudgetOk) {
+          console.log(
+            `[db] platform_daily_limit platform=facebook listing=${selected.listingId} max_per_day=${MAX_POSTS_PER_DAY} -- skipping`,
+          );
+          fbResult = { attempted: false, ok: false, skippedReason: "platform_daily_limit" };
+        } else {
+          fbResult = await postFacebookItem({ candidate: selected, caption: captions.facebook, image });
+          if (fbResult.ok && fbResult.attempted && (fbResult.postId || fbResult.photoId)) {
+            const postedAtIso = new Date().toISOString();
+            await persistPostSuccess({
+              listingId: selected.listingId,
+              platform: "facebook",
+              link: selected.canonicalListingUrl,
+              title: captions.listingTitle,
+              postedAtIso,
+            });
+            console.log(
+              `[db] db_row_inserted platform=facebook listing=${selected.listingId} posted_at=${postedAtIso}`,
+            );
+            console.log(`[db] new_item_posted platform=facebook listing=${selected.listingId}`);
+            updateSnapshotAfterSuccess({
+              snapshot: postingSnapshot,
+              listingId: selected.listingId,
+              platform: "facebook",
+              postedAtIso,
+            });
+          }
+        }
+      }
 
-      const pinResult: PublishResult & { pinId: string | null } = pinCaptionOk
-        ? await postPinterestItem({ candidate: selected, caption: captions.pinterest, image })
-        : { attempted: false, ok: false, pinId: null, skippedReason: "blank_caption" };
+      if (igCaptionText) {
+        const igDuplicateIso = hasRecentPlatformPost({
+          listingId: selected.listingId,
+          platform: "instagram",
+          nowMs,
+          snapshot: postingSnapshot,
+          dedupeWindowMs: DEDUPE_WINDOW_MS,
+        });
+        const igBudgetOk = platformHasDailyBudget(postingSnapshot, "instagram", MAX_POSTS_PER_DAY);
+        if (igDuplicateIso) {
+          console.log(
+            `[db] duplicate_found platform=instagram listing=${selected.listingId} posted_at=${igDuplicateIso} -- skipping`,
+          );
+          igResult = { attempted: false, ok: false, igId: null, skippedReason: "duplicate_recent" };
+        } else if (!igBudgetOk) {
+          console.log(
+            `[db] platform_daily_limit platform=instagram listing=${selected.listingId} max_per_day=${MAX_POSTS_PER_DAY} -- skipping`,
+          );
+          igResult = {
+            attempted: false,
+            ok: false,
+            igId: null,
+            skippedReason: "platform_daily_limit",
+          };
+        } else {
+          igResult = await postInstagramItem({ candidate: selected, caption: captions.instagram, image });
+          if (
+            igResult.ok &&
+            igResult.attempted &&
+            (igResult.publishId || igResult.creationId || igResult.postId)
+          ) {
+            const postedAtIso = new Date().toISOString();
+            await persistPostSuccess({
+              listingId: selected.listingId,
+              platform: "instagram",
+              link: selected.canonicalListingUrl,
+              title: captions.listingTitle,
+              postedAtIso,
+            });
+            console.log(
+              `[db] db_row_inserted platform=instagram listing=${selected.listingId} posted_at=${postedAtIso}`,
+            );
+            console.log(`[db] new_item_posted platform=instagram listing=${selected.listingId}`);
+            updateSnapshotAfterSuccess({
+              snapshot: postingSnapshot,
+              listingId: selected.listingId,
+              platform: "instagram",
+              postedAtIso,
+            });
+          }
+        }
+      }
+
+      if (pinCaptionOk) {
+        const pinDuplicateIso = hasRecentPlatformPost({
+          listingId: selected.listingId,
+          platform: "pinterest",
+          nowMs,
+          snapshot: postingSnapshot,
+          dedupeWindowMs: DEDUPE_WINDOW_MS,
+        });
+        const pinBudgetOk = platformHasDailyBudget(postingSnapshot, "pinterest", MAX_POSTS_PER_DAY);
+        if (pinDuplicateIso) {
+          console.log(
+            `[db] duplicate_found platform=pinterest listing=${selected.listingId} posted_at=${pinDuplicateIso} -- skipping`,
+          );
+          pinResult = { attempted: false, ok: false, pinId: null, skippedReason: "duplicate_recent" };
+        } else if (!pinBudgetOk) {
+          console.log(
+            `[db] platform_daily_limit platform=pinterest listing=${selected.listingId} max_per_day=${MAX_POSTS_PER_DAY} -- skipping`,
+          );
+          pinResult = { attempted: false, ok: false, pinId: null, skippedReason: "platform_daily_limit" };
+        } else {
+          pinResult = await postPinterestItem({ candidate: selected, caption: captions.pinterest, image });
+          if (pinResult.ok && pinResult.attempted && pinResult.pinId) {
+            const postedAtIso = new Date().toISOString();
+            await persistPostSuccess({
+              listingId: selected.listingId,
+              platform: "pinterest",
+              link: selected.canonicalListingUrl,
+              title: captions.listingTitle,
+              postedAtIso,
+            });
+            console.log(
+              `[db] db_row_inserted platform=pinterest listing=${selected.listingId} posted_at=${postedAtIso}`,
+            );
+            console.log(`[db] new_item_posted platform=pinterest listing=${selected.listingId}`);
+            updateSnapshotAfterSuccess({
+              snapshot: postingSnapshot,
+              listingId: selected.listingId,
+              platform: "pinterest",
+              postedAtIso,
+            });
+          }
+        }
+      }
 
       const attemptedAny = fbResult.attempted || igResult.attempted || pinResult.attempted;
       if (attemptedAny) {
-        currentState.last_attempted_post_at = new Date(nowMs).toISOString();
+        currentState.last_attempted_post_at = new Date().toISOString();
       }
 
       const fbSuccess =
@@ -2965,22 +3397,23 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
       }
 
       if (anySuccess) {
-        const postedAtIso = new Date(nowMs).toISOString();
+        const postedAtIso =
+          postingSnapshot?.perListingLatest.get(selected.listingId) ??
+          postingSnapshot?.latestOverall ??
+          new Date().toISOString();
         recordPostedItem(currentState, { itemId: selected.listingId, postedAtIso });
         currentState.posted_listing_ids = {
           [selected.listingId]: postedAtIso,
           ...currentState.posted_listing_ids,
         };
-        currentState.last_successful_post_at = postedAtIso;
-        if (fbSuccess) {
-          currentState.last_successful_fb_post_at = postedAtIso;
-        }
-        if (igSuccess) {
-          currentState.last_successful_ig_post_at = postedAtIso;
-        }
-        if (pinSuccess) {
-          currentState.last_successful_pin_post_at = postedAtIso;
-        }
+        currentState.last_successful_post_at =
+          postingSnapshot?.latestOverall ?? postedAtIso;
+        currentState.last_successful_fb_post_at =
+          postingSnapshot?.perPlatformLatest.facebook ?? currentState.last_successful_fb_post_at;
+        currentState.last_successful_ig_post_at =
+          postingSnapshot?.perPlatformLatest.instagram ?? currentState.last_successful_ig_post_at;
+        currentState.last_successful_pin_post_at =
+          postingSnapshot?.perPlatformLatest.pinterest ?? currentState.last_successful_pin_post_at;
         currentState.last_rotation_at = postedAtIso;
         postedCount += 1;
         logMeta("publish_complete", {
@@ -2999,6 +3432,8 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
           pin_attempted: pinResult.attempted,
         });
       }
+
+      applySnapshotToState(postingSnapshot);
 
       lastFbSuccess = fbSuccess;
       lastIgSuccess = igSuccess;

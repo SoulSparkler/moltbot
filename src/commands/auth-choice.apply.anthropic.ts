@@ -6,11 +6,16 @@ import {
   validateApiKeyInput,
 } from "./auth-choice.api-key.js";
 import { buildTokenProfileId, validateAnthropicSetupToken } from "./auth-token.js";
+import { applyPrimaryModel } from "./model-picker.js";
 import { applyAuthProfileConfig, setAnthropicApiKey } from "./onboard-auth.js";
+
+const ANTHROPIC_DEFAULT_MODEL = "anthropic/claude-sonnet-4-6";
 
 export async function applyAuthChoiceAnthropic(
   params: ApplyAuthChoiceParams,
 ): Promise<ApplyAuthChoiceResult | null> {
+  let agentModelOverride: string | undefined;
+
   if (
     params.authChoice === "setup-token" ||
     params.authChoice === "oauth" ||
@@ -55,7 +60,12 @@ export async function applyAuthChoiceAnthropic(
       provider,
       mode: "token",
     });
-    return { config: nextConfig };
+    if (params.setDefaultModel) {
+      nextConfig = applyPrimaryModel(nextConfig, ANTHROPIC_DEFAULT_MODEL);
+    } else if (params.agentId) {
+      agentModelOverride = ANTHROPIC_DEFAULT_MODEL;
+    }
+    return { config: nextConfig, agentModelOverride };
   }
 
   if (params.authChoice === "apiKey") {
@@ -94,7 +104,12 @@ export async function applyAuthChoiceAnthropic(
       provider: "anthropic",
       mode: "api_key",
     });
-    return { config: nextConfig };
+    if (params.setDefaultModel) {
+      nextConfig = applyPrimaryModel(nextConfig, ANTHROPIC_DEFAULT_MODEL);
+    } else if (params.agentId) {
+      agentModelOverride = ANTHROPIC_DEFAULT_MODEL;
+    }
+    return { config: nextConfig, agentModelOverride };
   }
 
   return null;

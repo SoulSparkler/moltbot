@@ -16,6 +16,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "pg": "^8.11.5",
     "sharp": "^0.33.5"
   },
   "devDependencies": {
