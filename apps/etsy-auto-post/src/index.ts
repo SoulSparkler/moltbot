@@ -1699,7 +1699,7 @@ function enabledPlatforms(): PostingPlatform[] {
   if (INSTAGRAM_ENABLED) {
     platforms.push("instagram");
   }
-  if (resolvePinterestEnablement()) {
+  if (pinterestEnabled()) {
     platforms.push("pinterest");
   }
   return platforms;

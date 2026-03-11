@@ -33,7 +33,7 @@ export function getPool(): Pool {
       max: 4,
       idleTimeoutMillis: 30_000,
     });
-    pool.on("error", (error) => {
+    pool.on("error", (error: unknown) => {
       console.error(`[db] pool error: ${String(error)}`);
     });
   }
