@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import process from "node:process";
 
@@ -48,12 +49,75 @@ async function ensureEtsyBuild() {
   return runPnpm(["--dir", "apps/etsy-auto-post", "build"]);
 }
 
+function resolveGatewayPort() {
+  const raw = process.env.OPENCLAW_GATEWAY_PORT?.trim() || process.env.PORT?.trim() || "8080";
+  const parsed = Number.parseInt(raw, 10);
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return parsed;
+  }
+  return 8080;
+}
+
+function resolveGatewayBind() {
+  const raw =
+    process.env.OPENCLAW_GATEWAY_BIND?.trim() || process.env.CLAWDBOT_GATEWAY_BIND?.trim() || "";
+  const normalized = raw.toLowerCase();
+  if (
+    normalized === "loopback" ||
+    normalized === "lan" ||
+    normalized === "tailnet" ||
+    normalized === "auto" ||
+    normalized === "custom"
+  ) {
+    return normalized;
+  }
+  return "lan";
+}
+
+function ensureGatewayToken() {
+  const existing =
+    process.env.OPENCLAW_GATEWAY_TOKEN?.trim() ||
+    process.env.CLAWDBOT_GATEWAY_TOKEN?.trim() ||
+    process.env.MOLTBOT_GATEWAY_TOKEN?.trim() ||
+    "";
+  if (existing) {
+    process.env.OPENCLAW_GATEWAY_TOKEN = existing;
+    return existing;
+  }
+  const generated = randomBytes(24).toString("base64url");
+  process.env.OPENCLAW_GATEWAY_TOKEN = generated;
+  console.warn(
+    "[openclaw start] OPENCLAW_GATEWAY_TOKEN missing; generated an ephemeral token for this deployment.",
+  );
+  return generated;
+}
+
 async function runGateway() {
   const bootstrap = await run("bash", ["scripts/bootstrap-ombaa.sh"]);
   if (!bootstrap.ok) {
     return bootstrap;
   }
-  return run(process.execPath, ["scripts/run-node.mjs"]);
+
+  const gatewayToken = ensureGatewayToken();
+  const gatewayPort = resolveGatewayPort();
+  const gatewayBind = resolveGatewayBind();
+  console.log(
+    `[openclaw start] gateway launch bind=${gatewayBind} port=${gatewayPort} token=${gatewayToken.slice(0, 6)}...`,
+  );
+
+  return run(process.execPath, [
+    "scripts/run-node.mjs",
+    "gateway",
+    "--allow-unconfigured",
+    "--bind",
+    gatewayBind,
+    "--port",
+    String(gatewayPort),
+    "--auth",
+    "token",
+    "--token",
+    gatewayToken,
+  ]);
 }
 
 async function runEtsyForeground() {
