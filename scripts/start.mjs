@@ -3,6 +3,7 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
+import path from "node:path";
 import process from "node:process";
 
 function spawnWithResult(command, args, env = process.env) {
@@ -39,6 +40,68 @@ function spawnPnpm(args, env = process.env) {
     return spawnWithResult("cmd.exe", ["/d", "/s", "/c", "pnpm", ...args], env);
   }
   return spawnWithResult("pnpm", args, env);
+}
+
+const LEGACY_CONFIG_FILES = ["openclaw.json", "clawdbot.json", "moltbot.json"];
+
+function pickExistingConfigPath(stateDir) {
+  for (const file of LEGACY_CONFIG_FILES) {
+    const candidate = path.join(stateDir, file);
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function resolveStateDirForStartup() {
+  const explicit =
+    process.env.OPENCLAW_STATE_DIR?.trim() ||
+    process.env.CLAWDBOT_STATE_DIR?.trim() ||
+    process.env.MOLTBOT_STATE_DIR?.trim() ||
+    "";
+  if (explicit) {
+    return explicit;
+  }
+
+  const candidates = ["/data/.openclaw", "/data/.clawdbot", "/data/.moltbot"];
+  for (const dir of candidates) {
+    if (pickExistingConfigPath(dir)) {
+      return dir;
+    }
+  }
+  return "/data/.openclaw";
+}
+
+function configurePersistentPaths() {
+  const stateDir = resolveStateDirForStartup();
+  process.env.OPENCLAW_STATE_DIR = stateDir;
+  process.env.CLAWDBOT_STATE_DIR = stateDir;
+  process.env.MOLTBOT_STATE_DIR = stateDir;
+
+  if (!process.env.OPENCLAW_CONFIG_PATH?.trim()) {
+    process.env.OPENCLAW_CONFIG_PATH =
+      pickExistingConfigPath(stateDir) || path.join(stateDir, "openclaw.json");
+  }
+
+  if (!process.env.OPENCLAW_WORKSPACE_DIR?.trim()) {
+    process.env.OPENCLAW_WORKSPACE_DIR = "/data/workspace";
+  }
+
+  try {
+    fs.mkdirSync(stateDir, { recursive: true });
+  } catch {
+    // ignore
+  }
+  try {
+    fs.mkdirSync(process.env.OPENCLAW_WORKSPACE_DIR, { recursive: true });
+  } catch {
+    // ignore
+  }
+
+  console.log(
+    `[openclaw start] state=${process.env.OPENCLAW_STATE_DIR} config=${process.env.OPENCLAW_CONFIG_PATH} workspace=${process.env.OPENCLAW_WORKSPACE_DIR}`,
+  );
 }
 
 async function ensureEtsyBuild() {
@@ -129,6 +192,8 @@ async function runEtsyForeground() {
 }
 
 async function main() {
+  configurePersistentPaths();
+
   const explicitMode = process.env.OPENCLAW_START_MODE?.trim().toLowerCase();
   const railwayServiceName = process.env.RAILWAY_SERVICE_NAME?.trim().toLowerCase() ?? "";
   const gatewayTokenHints = [
