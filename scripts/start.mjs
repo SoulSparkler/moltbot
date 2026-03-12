@@ -43,6 +43,10 @@ function spawnPnpm(args, env = process.env) {
   return spawnWithResult("pnpm", args, env);
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 const LEGACY_CONFIG_FILES = ["openclaw.json", "clawdbot.json", "moltbot.json"];
 
 function pickExistingConfigPath(stateDir) {
@@ -356,9 +360,8 @@ async function main() {
     if (!etsyEnv.RSS_TELEGRAM_POLLING) {
       etsyEnv.RSS_TELEGRAM_POLLING = "false";
     }
-
-    const etsy = spawnPnpm(["--dir", "apps/etsy-auto-post", "start"], etsyEnv);
     let finished = false;
+    let etsyChild = null;
 
     const exitAll = (code) => {
       if (finished) {
@@ -366,30 +369,39 @@ async function main() {
       }
       finished = true;
       try {
-        etsy.child.kill("SIGTERM");
+        etsyChild?.kill("SIGTERM");
       } catch {
         // ignore
       }
       process.exit(code);
     };
 
-    etsy.done
-      .then((result) => {
+    // Keep Etsy sidecar alive independently. Gateway remains the primary process
+    // so chat stays available even if Etsy crashes temporarily.
+    const runEtsyLoop = async () => {
+      let restartCount = 0;
+      while (!finished) {
+        const etsy = spawnPnpm(["--dir", "apps/etsy-auto-post", "start"], etsyEnv);
+        etsyChild = etsy.child;
+        const result = await etsy.done.catch((error) => {
+          if (!finished) {
+            console.error("[openclaw start] etsy-auto-post failed:", error);
+          }
+          return { ok: false, code: 1 };
+        });
         if (finished) {
           return;
         }
+        restartCount += 1;
+        const backoffMs = Math.min(30_000, 2_000 * 2 ** Math.min(restartCount - 1, 4));
         console.error(
-          `[openclaw start] etsy-auto-post exited (code=${result.code}); stopping container for restart`,
+          `[openclaw start] etsy-auto-post exited (code=${result.code}); restarting in ${backoffMs}ms`,
         );
-        exitAll(result.code);
-      })
-      .catch((error) => {
-        if (finished) {
-          return;
-        }
-        console.error("[openclaw start] etsy-auto-post failed:", error);
-        exitAll(1);
-      });
+        await sleep(backoffMs);
+      }
+    };
+
+    void runEtsyLoop();
 
     const gateway = await runGateway();
     exitAll(gateway.code);
