@@ -384,39 +384,25 @@ type ShareAndSaveOptions = {
   utm_campaign?: string;
 };
 
-function resolveShareAndSaveDomain(): string | null {
-  const raw = (process.env.ETSY_SHARE_AND_SAVE_DOMAIN ?? "tresortendance.etsy.com").trim();
-  if (!raw) {
-    return null;
-  }
-  return raw.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
-}
-
 export function toShareAndSaveUrl(
   originalUrl: string,
   options: ShareAndSaveOptions = {},
 ): string {
-  const shopDomain = resolveShareAndSaveDomain();
-  if (!shopDomain) {
-    return originalUrl;
-  }
-
   try {
     const url = new URL(originalUrl);
 
-    if (!/(\.|^)etsy\.com$/i.test(url.hostname) || !url.pathname.includes("/listing/")) {
+    if (!/(\.|^)etsy\.com$/i.test(url.hostname)) {
       return originalUrl;
     }
 
-    const match = url.pathname.match(/\/listing\/(\d+)(?:\/([^/?#]+))?/i);
+    const pathname = url.pathname.replace(/^\/[a-z]{2}(?:-[a-z]{2})?\/listing\//i, "/listing/");
+    const match = pathname.match(/^\/listing\/(\d+)(?:\/[^/?#]+)?/i);
     if (!match) {
       return originalUrl;
     }
 
     const [, listingId] = match;
-    const rewritten = new URL(
-      `https://${shopDomain}/listing/${listingId}`,
-    );
+    const rewritten = new URL(`https://www.etsy.com/listing/${listingId}`);
 
     url.searchParams.forEach((value, key) => {
       rewritten.searchParams.set(key, value);

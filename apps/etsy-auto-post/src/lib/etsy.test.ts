@@ -67,7 +67,7 @@ describe("toShareAndSaveUrl", () => {
     }
   });
 
-  it("rewrites Etsy listing URLs to the shop domain, strips slug, and keeps query params", () => {
+  it("normalizes Etsy listing URLs to canonical host, strips slug, and keeps query params", () => {
     process.env.ETSY_SHARE_AND_SAVE_DOMAIN = "tresortendance.etsy.com";
 
     const url = toShareAndSaveUrl("https://www.etsy.com/listing/12345/vintage-vase?ref=rss", {
@@ -77,7 +77,7 @@ describe("toShareAndSaveUrl", () => {
     });
 
     expect(url).toBe(
-      "https://tresortendance.etsy.com/listing/12345?ref=rss&utm_source=facebook&utm_medium=organic&utm_campaign=autopost",
+      "https://www.etsy.com/listing/12345?ref=rss&utm_source=facebook&utm_medium=organic&utm_campaign=autopost",
     );
   });
 
@@ -88,14 +88,14 @@ describe("toShareAndSaveUrl", () => {
     );
 
     expect(url).toBe(
-      "https://tresortendance.etsy.com/listing/99999?utm_source=facebook&utm_medium=organic&utm_campaign=autopost&ref=rss",
+      "https://www.etsy.com/listing/99999?utm_source=facebook&utm_medium=organic&utm_campaign=autopost&ref=rss",
     );
   });
 
-  it("normalizes configured domain even when protocol or trailing slashes are set", () => {
+  it("ignores custom share-and-save domain overrides and keeps canonical Etsy host", () => {
     process.env.ETSY_SHARE_AND_SAVE_DOMAIN = "https://customshop.etsy.com/";
     const url = toShareAndSaveUrl("https://www.etsy.com/listing/888/slug");
-    expect(url).toBe("https://customshop.etsy.com/listing/888");
+    expect(url).toBe("https://www.etsy.com/listing/888");
   });
 
   it("falls back to the original URL for non-Etsy links", () => {
@@ -105,10 +105,10 @@ describe("toShareAndSaveUrl", () => {
     ).toBe(input);
   });
 
-  it("uses the configured share-and-save domain when provided", () => {
+  it("keeps canonical Etsy host even when share-and-save domain env is provided", () => {
     process.env.ETSY_SHARE_AND_SAVE_DOMAIN = "customshop.etsy.com";
     const url = toShareAndSaveUrl("https://www.etsy.com/listing/99999/abc");
-    expect(url).toBe("https://customshop.etsy.com/listing/99999");
+    expect(url).toBe("https://www.etsy.com/listing/99999");
   });
 });
 

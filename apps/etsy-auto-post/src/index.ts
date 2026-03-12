@@ -62,7 +62,7 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN?.trim() ?? "";
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID?.trim() ?? "";
 // RSS_TELEGRAM_POLLING is the sidecar-specific override.
 // When running as a sidecar alongside the gateway, this MUST be "false" (or unset)
-// to avoid a Telegram 409 conflict — only one process may poll a bot token.
+// to avoid a Telegram 409 conflict --- only one process may poll a bot token.
 const TELEGRAM_POLLING_ENABLED =
   (process.env.RSS_TELEGRAM_POLLING ?? process.env.RUN_TELEGRAM_POLLING) === "true";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY?.trim() ?? "";
@@ -91,7 +91,7 @@ const PINTEREST_ENABLED_TOGGLE = resolveBooleanToggle("PINTEREST_ENABLED");
 const PINTEREST_ENABLED = PINTEREST_ENABLED_TOGGLE.enabled;
 const PINTEREST_TEST_MODE = process.env.PINTEREST_TEST_MODE === "true";
 const PINTEREST_TEST_IMAGE_URL = "https://via.placeholder.com/1000x1500.png";
-const PINTEREST_TEST_LINK = "https://tresortendance.etsy.com";
+const PINTEREST_TEST_LINK = "https://www.etsy.com/listing/0";
 const PINTEREST_TEST_TITLE = "TEST PIN - Jannetje";
 const PINTEREST_TEST_DESCRIPTION = "Smoke test";
 const CHECK_INTERVAL_MS = resolveCheckIntervalMs(process.env.RSS_CHECK_INTERVAL_MS);
@@ -480,7 +480,7 @@ function decodeXmlEntities(raw: string): string {
 
 // Dutch detection: require at least 2 distinct Dutch-specific indicators to reduce
 // false positives on English text. Single common short words (de, en, van, op, te)
-// also appear in English — so only longer / unambiguous Dutch words trigger solo.
+// also appear in English --- so only longer / unambiguous Dutch words trigger solo.
 const DUTCH_STRONG_WORDS =
   /\b(het|een|voor|niet|maar|ook|nog|naar|deze|zijn|haar|mijn|jouw|onze|jullie|bij|wel|uit|dit|dat|die)\b/i;
 const DUTCH_WEAK_WORDS = /\b(de|en|van|met|door|als|op|te|om)\b/i;
@@ -508,7 +508,7 @@ function isDutchText(text: string): boolean {
     return true;
   }
 
-  // Count distinct weak word matches — require >= 2.
+  // Count distinct weak word matches --- require >= 2.
   const weakMatches = new Set<string>();
   for (const m of trimmed.matchAll(new RegExp(DUTCH_WEAK_WORDS.source, "gi"))) {
     weakMatches.add(m[0].toLowerCase());
@@ -523,6 +523,27 @@ function isDutchText(text: string): boolean {
   }
 
   return false;
+}
+
+function hasDutchLocaleSignals(text: string): boolean {
+  const trimmed = (text || "").trim();
+  if (!trimmed) {
+    return false;
+  }
+  if (DUTCH_DOMAIN_WORDS.test(trimmed) || DUTCH_BIGRAM.test(trimmed)) {
+    return true;
+  }
+  if (DUTCH_STRONG_WORDS.test(trimmed)) {
+    return true;
+  }
+  const weakMatches = new Set<string>();
+  for (const m of trimmed.matchAll(new RegExp(DUTCH_WEAK_WORDS.source, "gi"))) {
+    weakMatches.add(m[0].toLowerCase());
+  }
+  if (weakMatches.size >= 2) {
+    return true;
+  }
+  return DUTCH_IJ_WORDS.test(trimmed) && weakMatches.size >= 1;
 }
 
 function stripHtmlToText(raw: string | undefined): string {
@@ -587,13 +608,13 @@ export function truncateAtSentenceBoundary(text: string, maxChars: number): stri
     return trimmed.slice(0, bestCut).trimEnd();
   }
 
-  // No sentence boundary found — cut at last whitespace before limit.
+  // No sentence boundary found --- cut at last whitespace before limit.
   const lastSpace = window.lastIndexOf(" ");
   if (lastSpace > 0) {
     return trimmed.slice(0, lastSpace).trimEnd();
   }
 
-  // No whitespace at all — hard cut at limit (should be rare).
+  // No whitespace at all --- hard cut at limit (should be rare).
   return window.trimEnd();
 }
 
@@ -630,7 +651,7 @@ async function translateTextToEnglish(params: { text: string }): Promise<string 
   }
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12_000).unref();
+  const timeout = setTimeout(() => controller.abort(), 12_000);
 
   try {
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -697,7 +718,7 @@ async function rewriteListingForSocialMedia(params: {
     .join("\n");
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 20_000).unref();
+  const timeout = setTimeout(() => controller.abort(), 20_000);
 
   try {
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -845,12 +866,20 @@ type ListingInfo = {
   canonicalUrl: string;
 };
 
+type ListingInfoResolution =
+  | { ok: true; info: ListingInfo }
+  | { ok: false; reason: "non_english_blocked" };
+
 type PlatformCaptions = {
   facebook: CaptionBuildResult;
   instagram: CaptionBuildResult;
   pinterest: { title: string; description: string; captionSource: string; langDetected: "en" | "nl"; translationApplied: boolean };
   listingTitle: string;
 };
+
+type PlatformCaptionsResolution =
+  | { ok: true; captions: PlatformCaptions }
+  | { ok: false; reason: "non_english_blocked" };
 
 type ResolvedImage = {
   imageUrl: string;
@@ -948,7 +977,7 @@ function toListingCandidate(item: FeedItem): ListingCandidate | null {
  * "Vintage Vase by TresorTendance").
  */
 export function stripEtsyShopSuffix(title: string): string {
-  // Match " by <Word>" at end — Etsy shop names are single CamelCase or
+  // Match " by <Word>" at end --- Etsy shop names are single CamelCase or
   // multi-word tokens; use a greedy match after the last " by ".
   return title.replace(/\s+by\s+\S+$/i, "").trim();
 }
@@ -957,7 +986,7 @@ async function resolveListingInfo(params: {
   item: FeedItem;
   canonicalListingUrl: string;
   listingHtml: string | null;
-}): Promise<ListingInfo> {
+}): Promise<ListingInfoResolution> {
   const rssTitle = params.item.title.trim();
   const rssDescriptionRaw = stripHtmlToText(params.item.description);
   const rssDescription = stripUrlsFromText(rssDescriptionRaw);
@@ -970,15 +999,15 @@ async function resolveListingInfo(params: {
   const ogDescription = html ? extractOgDescriptionFromHtml(html)?.trim() || null : null;
   const jsonLdDescription = html ? extractJsonLdDescriptionFromHtml(html)?.trim() || null : null;
 
-  // Title priority: og:title → JSON-LD name → RSS title (fallback)
-  let title = ogTitle || jsonLdName || rssTitle || "Vintage find from our Etsy shop";
+  // Title priority: og:title -> JSON-LD name -> RSS title.
+  let title = ogTitle || jsonLdName || rssTitle || "";
   let titleSource: ListingInfo["titleSource"] = ogTitle
     ? "og_title"
     : jsonLdName
       ? "jsonld_name"
       : "rss_fallback";
 
-  // Description priority: og:description → JSON-LD description → RSS description (fallback)
+  // Description priority: og:description -> JSON-LD description -> RSS description.
   let description = ogDescription || jsonLdDescription || rssDescription || "";
   let descriptionSource: ListingInfo["descriptionSource"] = ogDescription
     ? "og_description"
@@ -988,61 +1017,61 @@ async function resolveListingInfo(params: {
         ? "rss_fallback"
         : "none";
 
-  // Dutch detection and translation
-  const combinedText = `${title} ${description}`.trim();
-  let langDetected = detectCaptionLanguage(combinedText);
-
   const listingUrlLocale =
     extractEtsyListingLocaleFromUrl(params.item.link) ??
     extractEtsyListingLocaleFromUrl(params.item.id);
 
+  let combinedText = `${title} ${description}`.trim();
+  let langDetected = detectCaptionLanguage(combinedText);
   if (langDetected === "en" && listingUrlLocale === "nl") {
-    if (DUTCH_WEAK_WORDS.test(combinedText)) {
+    if (hasDutchLocaleSignals(combinedText)) {
       langDetected = "nl";
     }
     console.log(
-      `[caption] url_locale=nl text_lang=${langDetected} — URL locale override ${langDetected === "nl" ? "applied" : "skipped (no Dutch words in text)"}`,
+      `[caption] url_locale=nl text_lang=${langDetected} locale_override=${langDetected === "nl" ? "applied" : "skipped"}`,
     );
   }
 
   if (langDetected !== "en") {
-    const GENERIC_TITLE = "Vintage find from our Etsy shop";
     if (!OPENAI_API_KEY) {
       console.log(
-        `[caption] STAGE=LISTING_INFO WARNING: OPENAI_API_KEY missing — cannot translate, using English template fallback`,
+        `[caption] STAGE=LISTING_INFO SKIP reason=non_english_blocked translator=missing_openai_api_key`,
       );
-      // Never publish Dutch — use generic English fallback
-      title = GENERIC_TITLE;
-      titleSource = "rss_fallback";
-      description = "";
-      descriptionSource = "none";
-    } else {
-      const translatedTitle = await translateTextToEnglish({ text: title });
-      if (translatedTitle) {
-        title = translatedTitle;
-        titleSource = "translated";
+      return { ok: false, reason: "non_english_blocked" };
+    }
+
+    const translatedTitle = await translateTextToEnglish({ text: title });
+    if (!translatedTitle) {
+      console.log(
+        `[caption] STAGE=LISTING_INFO SKIP reason=non_english_blocked translator=title_translation_failed`,
+      );
+      return { ok: false, reason: "non_english_blocked" };
+    }
+    title = translatedTitle;
+    titleSource = "translated";
+
+    if (description) {
+      const translatedDesc = await translateTextToEnglish({ text: description });
+      if (translatedDesc) {
+        description = translatedDesc;
+        descriptionSource = "translated";
       } else {
-        // Translation failed — never publish Dutch
-        console.log(
-          `[caption] STAGE=LISTING_INFO WARNING: title translation returned null — using generic English fallback`,
-        );
-        title = GENERIC_TITLE;
-        titleSource = "rss_fallback";
+        description = "";
+        descriptionSource = "none";
       }
-      if (description) {
-        const translatedDesc = await translateTextToEnglish({ text: description });
-        if (translatedDesc) {
-          description = translatedDesc;
-          descriptionSource = "translated";
-        } else {
-          description = "";
-          descriptionSource = "none";
-        }
-      }
+    }
+
+    combinedText = `${title} ${description}`.trim();
+    langDetected = detectCaptionLanguage(combinedText);
+    if (langDetected !== "en") {
+      console.log(
+        `[caption] STAGE=LISTING_INFO SKIP reason=non_english_blocked translator=post_translation_non_english`,
+      );
+      return { ok: false, reason: "non_english_blocked" };
     }
   }
 
-  // AI rewrite: turn raw Etsy title+description into social-media-friendly copy
+  // AI rewrite: turn raw Etsy title+description into social-media-friendly copy.
   if (OPENAI_API_KEY && title) {
     const rewritten = await rewriteListingForSocialMedia({ title, description });
     if (rewritten) {
@@ -1053,8 +1082,23 @@ async function resolveListingInfo(params: {
         descriptionSource = "rewritten";
       }
     } else {
-      console.log(`[caption] STAGE=LISTING_INFO rewrite failed — using original text`);
+      console.log("[caption] STAGE=LISTING_INFO rewrite_failed using_original_text");
     }
+  }
+
+  combinedText = `${title} ${description}`.trim();
+  langDetected = detectCaptionLanguage(combinedText);
+  if (langDetected !== "en") {
+    console.log(
+      `[caption] STAGE=LISTING_INFO SKIP reason=non_english_blocked translator=final_output_non_english`,
+    );
+    return { ok: false, reason: "non_english_blocked" };
+  }
+  if (!title.trim()) {
+    console.log(
+      `[caption] STAGE=LISTING_INFO SKIP reason=non_english_blocked translator=empty_title_after_processing`,
+    );
+    return { ok: false, reason: "non_english_blocked" };
   }
 
   console.log(
@@ -1062,14 +1106,16 @@ async function resolveListingInfo(params: {
   );
 
   return {
-    title,
-    titleSource,
-    description,
-    descriptionSource,
-    canonicalUrl: params.canonicalListingUrl,
+    ok: true,
+    info: {
+      title,
+      titleSource,
+      description,
+      descriptionSource,
+      canonicalUrl: params.canonicalListingUrl,
+    },
   };
 }
-
 const FACEBOOK_HASHTAGS = ["#vintage", "#etsy", "#etsyfinds"];
 
 const INSTAGRAM_HASHTAGS = [
@@ -1111,7 +1157,7 @@ export function buildFacebookCaption(info: ListingInfo, shareUrl: string): Capti
 }
 
 export function buildInstagramCaption(info: ListingInfo): CaptionBuildResult {
-  // Hook line — short and engaging, different from FB title
+  // Hook line --- short and engaging, different from FB title
   const hookLine = info.title;
   const descLine = info.description
     ? truncateAtSentenceBoundary(info.description, 220)
@@ -1123,7 +1169,7 @@ export function buildInstagramCaption(info: ListingInfo): CaptionBuildResult {
   if (descLine) {
     parts.push("", descLine);
   }
-  parts.push("", "Find this and more in our shop — link in bio.");
+  parts.push("", "Find this and more in our shop --- link in bio.");
   parts.push("", hashtags);
 
   const captionText = parts.join("\n");
@@ -1148,7 +1194,7 @@ export function buildPinterestCaption(
   const title = truncateAtSentenceBoundary(info.title, 100);
   const descText = info.description
     ? truncateAtSentenceBoundary(info.description, 450)
-    : "Vintage treasure from our Etsy shop.";
+    : "";
   const pinHashtags = INSTAGRAM_HASHTAGS.slice(0, 10).join(" ");
   const description = `${descText}\n\n${pinHashtags}`;
   const captionSource = info.titleSource === "translated" ? "translated" : info.titleSource;
@@ -1166,20 +1212,27 @@ export function buildPinterestCaption(
   };
 }
 
-async function buildPlatformCaptions(params: {
+export async function buildPlatformCaptions(params: {
   item: FeedItem;
   canonicalListingUrl: string;
   listingHtml: string | null;
-}): Promise<PlatformCaptions> {
-  const info = await resolveListingInfo(params);
+}): Promise<PlatformCaptionsResolution> {
+  const resolved = await resolveListingInfo(params);
+  if (!resolved.ok) {
+    return resolved;
+  }
+  const info = resolved.info;
   const fbShareUrl = buildShareAndSaveUrl(params.canonicalListingUrl, "facebook");
   const pinShareUrl = buildShareAndSaveUrl(params.canonicalListingUrl, "pinterest");
 
   return {
-    facebook: buildFacebookCaption(info, fbShareUrl),
-    instagram: buildInstagramCaption(info),
-    pinterest: buildPinterestCaption(info, pinShareUrl),
-    listingTitle: info.title,
+    ok: true,
+    captions: {
+      facebook: buildFacebookCaption(info, fbShareUrl),
+      instagram: buildInstagramCaption(info),
+      pinterest: buildPinterestCaption(info, pinShareUrl),
+      listingTitle: info.title,
+    },
   };
 }
 
@@ -1404,7 +1457,7 @@ async function saveState(state: WatcherState): Promise<void> {
     null,
     2,
   );
-  // Atomic write: write to temp file first, then rename — prevents partial/corrupt state on crash.
+  // Atomic write: write to temp file first, then rename --- prevents partial/corrupt state on crash.
   const tempPath = `${STATE_PATH}.tmp`;
   await writeFile(tempPath, serialized, "utf8");
   await rename(tempPath, STATE_PATH);
@@ -1682,7 +1735,7 @@ export function shouldPostNow(
     return { ok: false, reason: "daily_limit" };
   }
 
-  // Only gate on successful posts — failed attempts should not block retries.
+  // Only gate on successful posts --- failed attempts should not block retries.
   if (lastSuccessMs != null && nowMs - lastSuccessMs < minIntervalMs) {
     return { ok: false, reason: "min_interval" };
   }
@@ -2236,11 +2289,11 @@ export function toEnglishFetchUrl(listingUrl: string): string {
     if (!parsed.hostname.endsWith("etsy.com")) {
       return listingUrl;
     }
-    // Strip locale prefix from pathname (e.g. /nl/listing/123 → /listing/123)
+    // Strip locale prefix from pathname (e.g. /nl/listing/123 --- /listing/123)
     parsed.pathname = parsed.pathname.replace(/^\/[a-z]{2}(?:-[a-z]{2})?\/listing\//i, "/listing/");
     // Always use www.etsy.com (not shop subdomain) to avoid geo-localized responses
     parsed.hostname = "www.etsy.com";
-    // Strip query/hash — only the path matters for metadata extraction
+    // Strip query/hash --- only the path matters for metadata extraction
     parsed.search = "";
     parsed.hash = "";
     return parsed.toString();
@@ -2252,7 +2305,7 @@ export function toEnglishFetchUrl(listingUrl: string): string {
 async function fetchEtsyListingHtml(params: { listingUrlNormalized: string }): Promise<string> {
   const fetchUrl = toEnglishFetchUrl(params.listingUrlNormalized);
   if (fetchUrl !== params.listingUrlNormalized) {
-    console.log(`[rss] STAGE=HTML_FETCH normalized ${params.listingUrlNormalized} → ${fetchUrl}`);
+    console.log(`[rss] STAGE=HTML_FETCH normalized ${params.listingUrlNormalized} --- ${fetchUrl}`);
   }
   let lastStatus: number | null = null;
   let lastError: unknown = null;
@@ -2343,7 +2396,7 @@ async function postInstagramItem(params: {
     return { ok: false, attempted: false, igId, skippedReason: "image_missing" };
   }
 
-  // ── Instagram image validation & transformation ──────────────────────
+  // ------ Instagram image validation & transformation ------------------------------------------------------------------
   const originalImageUrl = imageToUse.imageUrl;
   const sanitizedImageUrl = sanitizeInstagramImageUrl(originalImageUrl);
   const urlWasSanitized = sanitizedImageUrl !== originalImageUrl;
@@ -2374,7 +2427,7 @@ async function postInstagramItem(params: {
     const ratioSafe = isInstagramSafeAspectRatio(probe.width, probe.height);
     if (!ratioSafe) {
       console.log(
-        `[rss][ig] image_ratio_unsafe listing=${params.candidate.listingId} ratio=${probe.aspectRatio.toFixed(4)} (needs 0.80–1.91), attempting pad`,
+        `[rss][ig] image_ratio_unsafe listing=${params.candidate.listingId} ratio=${probe.aspectRatio.toFixed(4)} (needs 0.80---1.91), attempting pad`,
       );
 
       const padded = await padImageForInstagram(probe.buffer, probe.width, probe.height);
@@ -2739,8 +2792,11 @@ async function postPinterestItem(params: {
   }
 
   const shareAndSaveUrl = buildShareAndSaveUrl(params.candidate.canonicalListingUrl, "pinterest");
-  const title = params.caption.title || "Antique & Vintage Find";
-  const description = params.caption.description || "Vintage treasure from our Etsy shop.";
+  const title = params.caption.title.trim();
+  const description = params.caption.description.trim();
+  if (!title && !description) {
+    return { ok: false, attempted: false, pinId: null, skippedReason: "blank_caption" };
+  }
 
   console.log(
     `[rss] STAGE=POST_PINTEREST attempt listing=${params.candidate.listingId} board_id=${PINTEREST_BOARD_ID} image_host=${params.image.imageHost ?? "unknown"} title_len=${title.length}`,
@@ -2839,8 +2895,13 @@ export function classifyFeedItems(params: {
   gate: ReturnType<typeof shouldPostNow>;
   nowMs: number;
   ignoreDedupe?: boolean;
+  snapshot?: PostingHistorySnapshot | null;
+  platforms?: PostingPlatform[];
+  dedupeWindowMs?: number;
 }): { decisions: DiagnosticsDecision[]; eligibleCandidates: ListingCandidate[] } {
   const ignoreDedupe = params.ignoreDedupe === true;
+  const platforms = params.platforms ?? [];
+  const dedupeWindowMs = Math.max(0, params.dedupeWindowMs ?? DEDUPE_WINDOW_MS);
   const seenListingIds = new Set<string>();
   const decisions: DiagnosticsDecision[] = [];
   const eligibleCandidates: ListingCandidate[] = [];
@@ -2893,6 +2954,23 @@ export function classifyFeedItems(params: {
       reason = "dedupe_ignored";
     }
 
+    let listingLevelLastPosted: string | null = null;
+    if (decision === "NEW" && !ignoreDedupe) {
+      const fullyPosted = listingFullyPostedWithinWindow({
+        listingId: candidate.listingId,
+        snapshot: params.snapshot ?? null,
+        platforms,
+        nowMs: params.nowMs,
+        dedupeWindowMs,
+      });
+      if (fullyPosted.duplicate) {
+        decision = "SKIP";
+        reason = "listing_fully_posted";
+        listingLevelLastPosted = fullyPosted.lastPostedAt;
+      }
+    }
+    const effectiveLastPostedAt = listingLevelLastPosted ?? lastPostedAt;
+
     decisions.push({
       index: index + 1,
       feedId: item.id,
@@ -2903,11 +2981,11 @@ export function classifyFeedItems(params: {
       publishedAtMs: item.publishedAtMs ?? null,
       decision,
       reason,
-      ...(lastPostedAt ? { lastPostedAt } : {}),
+      ...(effectiveLastPostedAt ? { lastPostedAt: effectiveLastPostedAt } : {}),
     });
 
     console.log(
-      `[rss] STAGE=DEDUPE_CHECK listingId=${candidate.listingId} canonicalUrl=${candidate.canonicalListingUrl} decision=${decision} reason=${reason} last_posted_at=${lastPostedAt ?? "none"} published_at=${candidate.publishedAt ?? "unknown"}`,
+      `[rss] STAGE=DEDUPE_CHECK listingId=${candidate.listingId} canonicalUrl=${candidate.canonicalListingUrl} decision=${decision} reason=${reason} last_posted_at=${effectiveLastPostedAt ?? "none"} published_at=${candidate.publishedAt ?? "unknown"}`,
     );
 
     if (decision === "NEW") {
@@ -3047,7 +3125,7 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
         today_count: todayCount,
       });
       console.log(
-        `[rss] STAGE=GATE_CHECK result=BLOCKED reason=${gate.reason ?? "unknown"} max_posts_per_day=${MAX_POSTS_PER_DAY} min_post_interval_hours=${MIN_POST_INTERVAL_HOURS} today_count=${todayCount} last_successful_post_at=${currentState.last_successful_post_at ?? "never"} last_attempted_post_at=${currentState.last_attempted_post_at ?? "never"} fetched=${items.length} — BLOCKED — no items processed`,
+        `[rss] STAGE=GATE_CHECK result=BLOCKED reason=${gate.reason ?? "unknown"} max_posts_per_day=${MAX_POSTS_PER_DAY} min_post_interval_hours=${MIN_POST_INTERVAL_HOURS} today_count=${todayCount} last_successful_post_at=${currentState.last_successful_post_at ?? "never"} last_attempted_post_at=${currentState.last_attempted_post_at ?? "never"} fetched=${items.length} --- BLOCKED --- no items processed`,
       );
       console.log(
         `[rss][metrics] trigger=${trigger} fetched=${items.length} inspected=0 new=0 skipped_dedupe=0 skipped_feed_dup=0 skipped_missing_id=0 gate_reason=${gate.reason ?? "unknown"} ignore_dedupe=${IGNORE_DEDUPE}`,
@@ -3069,19 +3147,22 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
       return;
     }
 
-    const classificationState = { ...currentState, posted_listing_ids: {} };
     const classification = classifyFeedItems({
       feedItems: items,
-      state: classificationState,
+      state: currentState,
       gate,
       nowMs,
       ignoreDedupe: IGNORE_DEDUPE,
+      snapshot: postingSnapshot,
+      platforms,
+      dedupeWindowMs: DEDUPE_WINDOW_MS,
     });
 
     const decisions = classification.decisions;
     const eligible = classification.eligibleCandidates;
 
     const skippedDedupe = decisions.filter((d) => d.reason.startsWith("dedupe")).length;
+    const skippedListingFully = decisions.filter((d) => d.reason === "listing_fully_posted").length;
     const skippedFeedDup = decisions.filter((d) => d.reason === "duplicate_in_feed").length;
     const skippedMissingId = decisions.filter((d) => d.reason === "no_listing_id").length;
 
@@ -3094,7 +3175,7 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
     }
 
     console.log(
-      `[rss][metrics] trigger=${trigger} fetched=${items.length} inspected=${decisions.length} new=${eligible.length} skipped_dedupe=${skippedDedupe} skipped_feed_dup=${skippedFeedDup} skipped_missing_id=${skippedMissingId} ignore_dedupe=${IGNORE_DEDUPE}`,
+      `[rss][metrics] trigger=${trigger} fetched=${items.length} inspected=${decisions.length} new=${eligible.length} skipped_dedupe=${skippedDedupe} skipped_listing_fully=${skippedListingFully} skipped_feed_dup=${skippedFeedDup} skipped_missing_id=${skippedMissingId} ignore_dedupe=${IGNORE_DEDUPE}`,
     );
 
     if (eligible.length === 0) {
@@ -3103,6 +3184,7 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
         dedupe_days: DEDUPE_DAYS,
         ignore_dedupe: IGNORE_DEDUPE,
         skipped_dedupe: skippedDedupe,
+        skipped_listing_fully: skippedListingFully,
         skipped_feed_dup: skippedFeedDup,
         skipped_missing_id: skippedMissingId,
       });
@@ -3168,7 +3250,7 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
         batch_total: toPost.length,
       });
 
-      // Fetch listing HTML once — used by both image resolution and caption building.
+      // Fetch listing HTML once --- used by both image resolution and caption building.
       let listingHtml: string | null = null;
       try {
         listingHtml = await fetchEtsyListingHtml({ listingUrlNormalized: selected.canonicalListingUrl });
@@ -3187,11 +3269,23 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
         continue;
       }
 
-      const captions = await buildPlatformCaptions({
+      const captionsResult = await buildPlatformCaptions({
         item: selected,
         canonicalListingUrl: selected.canonicalListingUrl,
         listingHtml,
       });
+      if (!captionsResult.ok) {
+        logMeta("publish_skipped", {
+          listingId: selected.listingId,
+          canonicalListingUrl: selected.canonicalListingUrl,
+          reason: captionsResult.reason,
+        });
+        console.log(
+          `[rss][decision] listing=${selected.listingId} decision=SKIP reason=${captionsResult.reason} link=${selected.canonicalListingUrl}`,
+        );
+        continue;
+      }
+      const captions = captionsResult.captions;
 
       // Hard gate: never publish a blank caption. If caption is empty, skip that platform and log.
       const fbCaptionText = captions.facebook.captionText.trim();
@@ -3202,17 +3296,17 @@ async function runCheck(trigger: "startup" | "scheduled" | "manual"): Promise<vo
 
       if (!fbCaptionText) {
         console.log(
-          `[publish] BLANK_CAPTION_ABORT platform=facebook listing=${selected.listingId} caption_len=0 — skipping facebook to prevent blank post`,
+          `[publish] BLANK_CAPTION_ABORT platform=facebook listing=${selected.listingId} caption_len=0 --- skipping facebook to prevent blank post`,
         );
       }
       if (!igCaptionText) {
         console.log(
-          `[publish] BLANK_CAPTION_ABORT platform=instagram listing=${selected.listingId} caption_len=0 — skipping instagram to prevent blank post`,
+          `[publish] BLANK_CAPTION_ABORT platform=instagram listing=${selected.listingId} caption_len=0 --- skipping instagram to prevent blank post`,
         );
       }
       if (!pinCaptionOk) {
         console.log(
-          `[publish] BLANK_CAPTION_ABORT platform=pinterest listing=${selected.listingId} title_len=0 desc_len=0 — skipping pinterest to prevent blank post`,
+          `[publish] BLANK_CAPTION_ABORT platform=pinterest listing=${selected.listingId} title_len=0 desc_len=0 --- skipping pinterest to prevent blank post`,
         );
       }
 
@@ -3545,6 +3639,9 @@ async function collectDiagnostics(limit = 5): Promise<DiagnosticsReport> {
     gate,
     nowMs,
     ignoreDedupe: IGNORE_DEDUPE,
+    snapshot: postingSnapshot,
+    platforms: enabledPlatforms(),
+    dedupeWindowMs: DEDUPE_WINDOW_MS,
   });
 
   return {
@@ -3695,8 +3792,9 @@ function logHeartbeat(): void {
   const last = lastRunSummary;
   const nextAtMs = last ? last.at + CHECK_INTERVAL_MS : now + CHECK_INTERVAL_MS;
   const nextInMs = Math.max(0, nextAtMs - now);
+  const uptimeSeconds = Math.floor(process.uptime());
   console.log(
-    `[rss][heartbeat] now=${new Date(now).toISOString()} last_run=${last ? new Date(last.at).toISOString() : "never"} last_trigger=${last?.trigger ?? "n/a"} last_gate_ok=${last?.gate.ok ?? false} last_gate_reason=${last?.gate.reason ?? "none"} last_selected=${last?.selectedListingId ?? "none"} last_successful_post_at=${currentState.last_successful_post_at ?? "none"} last_attempted_post_at=${currentState.last_attempted_post_at ?? "none"} next_run_in_ms=${nextInMs} ignore_dedupe=${IGNORE_DEDUPE} state_path=${STATE_PATH}`,
+    `[rss][heartbeat] now=${new Date(now).toISOString()} last_run=${last ? new Date(last.at).toISOString() : "never"} last_trigger=${last?.trigger ?? "n/a"} last_gate_ok=${last?.gate.ok ?? false} last_gate_reason=${last?.gate.reason ?? "none"} last_selected=${last?.selectedListingId ?? "none"} last_successful_post_at=${currentState.last_successful_post_at ?? "none"} last_attempted_post_at=${currentState.last_attempted_post_at ?? "none"} next_run_in_ms=${nextInMs} ignore_dedupe=${IGNORE_DEDUPE} state_path=${STATE_PATH} scheduler_alive=true uptime_s=${uptimeSeconds}`,
   );
 }
 
@@ -3876,11 +3974,11 @@ async function main(): Promise<void> {
   await scheduleCheck("startup");
   setInterval(() => {
     void scheduleCheck("scheduled");
-  }, CHECK_INTERVAL_MS).unref();
+  }, CHECK_INTERVAL_MS);
   logHeartbeat();
   setInterval(() => {
     logHeartbeat();
-  }, HEARTBEAT_INTERVAL_MS).unref();
+  }, HEARTBEAT_INTERVAL_MS);
   void pollTelegramForCommands();
 }
 

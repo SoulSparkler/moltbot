@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { canonicalizeEtsyUrl } from "./lib/meta-facebook.js";
+import type { PostingHistorySnapshot } from "./db.js";
 import {
   buildShareAndSaveUrl,
+  buildPlatformCaptions,
   composeCaptionWithShareUrl,
   extractListingId,
   extractRssImageUrl,
@@ -17,42 +19,42 @@ import {
 } from "./index.js";
 
 describe("canonicalizeEtsyUrl", () => {
-  it("normalizes locale-prefixed listing URLs to slugless shop-domain form", () => {
+  it("normalizes locale-prefixed listing URLs to slugless canonical form", () => {
     expect(
       canonicalizeEtsyUrl("https://www.etsy.com/nl/listing/12345/slug-title?ref=rss&utm_source=x"),
-    ).toBe("https://tresortendance.etsy.com/listing/12345");
+    ).toBe("https://www.etsy.com/listing/12345");
   });
 });
 
 describe("share-and-save URLs", () => {
-  it("builds Facebook share URL on the shop domain, always slugless, with expected UTM params", () => {
+  it("builds Facebook share URL on canonical Etsy host, always slugless, with expected UTM params", () => {
     const url = buildShareAndSaveUrl("https://www.etsy.com/listing/12345/slug-title?ref=rss", "facebook");
     expect(url).toBe(
-      "https://tresortendance.etsy.com/listing/12345?ref=rss&utm_source=facebook&utm_medium=organic&utm_campaign=autopost",
+      "https://www.etsy.com/listing/12345?ref=rss&utm_source=facebook&utm_medium=organic&utm_campaign=autopost",
     );
   });
 
-  it("builds Instagram share URL on the shop domain, always slugless, with expected UTM params", () => {
+  it("builds Instagram share URL on canonical Etsy host, always slugless, with expected UTM params", () => {
     const url = buildShareAndSaveUrl("https://www.etsy.com/listing/12345/slug-title", "instagram");
     expect(url).toBe(
-      "https://tresortendance.etsy.com/listing/12345?utm_source=instagram&utm_medium=organic&utm_campaign=autopost",
+      "https://www.etsy.com/listing/12345?utm_source=instagram&utm_medium=organic&utm_campaign=autopost",
     );
   });
 
-  it("builds Pinterest share URL on the shop domain, always slugless", () => {
+  it("builds Pinterest share URL on canonical Etsy host, always slugless", () => {
     const url = buildShareAndSaveUrl(
       "https://www.etsy.com/nl/listing/4465924335/vintage-laguiole-snijset-foo?ref=rss",
       "pinterest",
     );
     expect(url).toBe(
-      "https://tresortendance.etsy.com/listing/4465924335?ref=rss&utm_source=pinterest&utm_medium=organic&utm_campaign=autopost",
+      "https://www.etsy.com/listing/4465924335?ref=rss&utm_source=pinterest&utm_medium=organic&utm_campaign=autopost",
     );
   });
 
   it("composes captions so the Share & Save URL is present exactly once", () => {
-    const share = "https://tresortendance.etsy.com/listing/12345";
-    expect(composeCaptionWithShareUrl("Nice find", share)).toBe("Nice find\nhttps://tresortendance.etsy.com/listing/12345");
-    expect(composeCaptionWithShareUrl("", share)).toBe("https://tresortendance.etsy.com/listing/12345");
+    const share = "https://www.etsy.com/listing/12345";
+    expect(composeCaptionWithShareUrl("Nice find", share)).toBe("Nice find\nhttps://www.etsy.com/listing/12345");
+    expect(composeCaptionWithShareUrl("", share)).toBe("https://www.etsy.com/listing/12345");
   });
 });
 
@@ -168,6 +170,57 @@ describe("classifyFeedItems", () => {
     expect(result.eligibleCandidates.map((c) => c.listingId)).toEqual(["123"]);
   });
 
+  it("skips listings fully posted across enabled platforms within the dedupe window", () => {
+    const state = {
+      seenIds: [],
+      initialized: true,
+      telegramOffset: 0,
+      posted_listing_ids: {},
+    };
+    const postedIso = new Date(nowMs - 60 * 60 * 1000).toISOString();
+    const snapshot: PostingHistorySnapshot = {
+      perListingPlatform: new Map([
+        [
+          "123",
+          new Map([
+            ["facebook", postedIso],
+            ["instagram", postedIso],
+            ["pinterest", postedIso],
+          ]),
+        ],
+      ]),
+      perListingLatest: new Map([["123", postedIso]]),
+      perPlatform24hCount: { facebook: 1, instagram: 1, pinterest: 1 },
+      perPlatformLatest: { facebook: postedIso, instagram: postedIso, pinterest: postedIso },
+      latestOverall: postedIso,
+    };
+
+    const feedItems = [
+      {
+        id: "https://www.etsy.com/listing/123/first",
+        title: "Item 123",
+        link: "https://www.etsy.com/listing/123/first",
+        publishedAt: new Date(nowMs - 2 * 60 * 60 * 1000).toISOString(),
+        publishedAtMs: nowMs - 2 * 60 * 60 * 1000,
+      },
+    ];
+
+    const result = classifyFeedItems({
+      feedItems,
+      state,
+      gate: { ok: true },
+      nowMs,
+      snapshot,
+      platforms: ["facebook", "instagram", "pinterest"],
+      dedupeWindowMs: 30 * 24 * 60 * 60 * 1000,
+    });
+
+    expect(result.decisions[0].decision).toBe("SKIP");
+    expect(result.decisions[0].reason).toBe("listing_fully_posted");
+    expect(result.decisions[0].lastPostedAt).toBe(postedIso);
+    expect(result.eligibleCandidates).toHaveLength(0);
+  });
+
   it("marks duplicate listing IDs in the same feed", () => {
     const state = { seenIds: [], initialized: true, telegramOffset: 0 };
     const feedItems = [
@@ -233,7 +286,7 @@ describe("shouldPostNow", () => {
       last_attempted_post_at: new Date(nowMs - 2 * 60 * 60 * 1000).toISOString(),
     };
 
-    // Failed attempts should NOT block the gate — only successful posts should.
+    // Failed attempts should NOT block the gate --- only successful posts should.
     const result = shouldPostNow(state, nowMs, { minPostIntervalMs: 24 * 60 * 60 * 1000 });
     expect(result.ok).toBe(true);
   });
@@ -295,9 +348,9 @@ describe("buildFacebookCaption", () => {
     titleSource: "og_title" as const,
     description: "Beautiful hand-painted ceramic vase from the 1960s. Features floral motifs in blue and gold.",
     descriptionSource: "og_description" as const,
-    canonicalUrl: "https://tresortendance.etsy.com/listing/12345",
+    canonicalUrl: "https://www.etsy.com/listing/12345",
   };
-  const shareUrl = "https://tresortendance.etsy.com/listing/12345?utm_source=facebook&utm_medium=organic&utm_campaign=autopost";
+  const shareUrl = "https://www.etsy.com/listing/12345?utm_source=facebook&utm_medium=organic&utm_campaign=autopost";
 
   it("includes the Share & Save URL line", () => {
     const result = buildFacebookCaption(baseInfo, shareUrl);
@@ -342,7 +395,7 @@ describe("buildInstagramCaption", () => {
     titleSource: "og_title" as const,
     description: "Elegant porcelain plate with hand-painted floral design. Made in Limoges, France.",
     descriptionSource: "og_description" as const,
-    canonicalUrl: "https://tresortendance.etsy.com/listing/12345",
+    canonicalUrl: "https://www.etsy.com/listing/12345",
   };
 
   it("includes hashtags line", () => {
@@ -380,9 +433,9 @@ describe("buildPinterestCaption", () => {
     titleSource: "og_title" as const,
     description: "Beautiful set of six vintage crystal wine glasses. Perfect for entertaining or as a collector's item.",
     descriptionSource: "og_description" as const,
-    canonicalUrl: "https://tresortendance.etsy.com/listing/12345",
+    canonicalUrl: "https://www.etsy.com/listing/12345",
   };
-  const shareUrl = "https://tresortendance.etsy.com/listing/12345?utm_source=pinterest&utm_medium=organic&utm_campaign=autopost";
+  const shareUrl = "https://www.etsy.com/listing/12345?utm_source=pinterest&utm_medium=organic&utm_campaign=autopost";
 
   it("has title <= 100 chars", () => {
     const result = buildPinterestCaption(baseInfo, shareUrl);
@@ -398,6 +451,30 @@ describe("buildPinterestCaption", () => {
     const result = buildPinterestCaption(baseInfo, shareUrl);
     expect(result.title).not.toContain("/nl/");
     expect(result.description).not.toContain("/nl/");
+  });
+});
+
+describe("language policy", () => {
+  it("skips Dutch listing copy when translation is unavailable", async () => {
+    if ((process.env.OPENAI_API_KEY ?? "").trim().length > 0) {
+      return;
+    }
+
+    const result = await buildPlatformCaptions({
+      item: {
+        id: "https://www.etsy.com/nl/listing/4465924335/example",
+        title: "Vintage glazen vaas set",
+        link: "https://www.etsy.com/nl/listing/4465924335/example",
+        description: "Mooie set van handgemaakte glazen voor je tafel.",
+      },
+      canonicalListingUrl: "https://www.etsy.com/listing/4465924335",
+      listingHtml: null,
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe("non_english_blocked");
+    }
   });
 });
 
@@ -461,18 +538,18 @@ describe("stripEtsyShopSuffix", () => {
   });
 });
 
-// ─── PRODUCTION STABILITY TESTS ────────────────────────────────────────────
+// --------- PRODUCTION STABILITY TESTS ------------------------------------------------------------------------------------------------------------------------------------
 
-describe("blank caption guard — captions must never be empty", () => {
+describe("blank caption guard --- captions must never be empty", () => {
   const baseInfo = {
     title: "Vintage Italian Ceramic Vase",
     titleSource: "og_title" as const,
     description: "Hand-painted ceramic vase from the 1960s.",
     descriptionSource: "og_description" as const,
-    canonicalUrl: "https://tresortendance.etsy.com/listing/12345",
+    canonicalUrl: "https://www.etsy.com/listing/12345",
   };
   const shareUrl =
-    "https://tresortendance.etsy.com/listing/12345?utm_source=facebook&utm_medium=organic&utm_campaign=autopost";
+    "https://www.etsy.com/listing/12345?utm_source=facebook&utm_medium=organic&utm_campaign=autopost";
 
   it("Facebook caption is never empty for a listing with title", () => {
     const result = buildFacebookCaption(baseInfo, shareUrl);
@@ -506,7 +583,7 @@ describe("blank caption guard — captions must never be empty", () => {
   });
 });
 
-describe("one post per day — daily gate enforcement", () => {
+describe("one post per day --- daily gate enforcement", () => {
   it("blocks when one listing was already posted within 24 hours", () => {
     const nowMs = Date.UTC(2025, 5, 15, 14, 0, 0);
     const state = {
@@ -564,7 +641,7 @@ describe("one post per day — daily gate enforcement", () => {
   });
 });
 
-describe("listing ID extraction — deterministic and consistent", () => {
+describe("listing ID extraction --- deterministic and consistent", () => {
   it("extracts listing ID from standard URL", () => {
     expect(extractListingId("https://www.etsy.com/listing/1234567890/title")).toBe("1234567890");
   });
@@ -595,7 +672,7 @@ describe("listing ID extraction — deterministic and consistent", () => {
   });
 });
 
-describe("repost prevention — old listings must stay skipped", () => {
+describe("repost prevention --- old listings must stay skipped", () => {
   const nowMs = Date.UTC(2025, 5, 15, 12, 0, 0);
 
   it("marks listing as duplicate when posted within dedupe window", () => {

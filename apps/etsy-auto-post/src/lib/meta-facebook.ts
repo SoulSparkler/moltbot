@@ -111,7 +111,7 @@ export function canonicalizeEtsyListingUrl(raw: string): string {
   const listingId = match[1];
   const slug = match[2]?.trim();
 
-  // Always slugless: https://www.etsy.com/listing/<id> — no locale prefix, no slug, no query/hash.
+  // Always slugless: https://www.etsy.com/listing/<id> - no locale prefix, no slug, no query/hash.
   parsed.protocol = "https:";
   parsed.username = "";
   parsed.password = "";
@@ -124,19 +124,7 @@ export function canonicalizeEtsyListingUrl(raw: string): string {
 }
 
 export function canonicalizeEtsyUrl(raw: string): string {
-  const canonical = canonicalizeEtsyListingUrl(raw);
-
-  // Rewrite to shop subdomain for Share & Save payback, slugless.
-  const shopDomain = (process.env.ETSY_SHARE_AND_SAVE_DOMAIN ?? "tresortendance.etsy.com")
-    .trim()
-    .replace(/^https?:\/\//i, "")
-    .replace(/\/+$/, "");
-
-  if (!shopDomain) {
-    return canonical;
-  }
-
-  return canonical.replace(/^https:\/\/www\.etsy\.com\/listing\//i, `https://${shopDomain}/listing/`);
+  return canonicalizeEtsyListingUrl(raw);
 }
 
 function normalizeGraphHttpUrl(raw: string, label: string): string {

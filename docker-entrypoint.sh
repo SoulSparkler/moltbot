@@ -56,18 +56,19 @@ echo "[entrypoint] Config path: $OPENCLAW_CONFIG_PATH"
 : "${OPENCLAW_GATEWAY_PORT:=${PORT:-8080}}"
 export OPENCLAW_GATEWAY_PORT
 
-# Workspace directory (respect env, but fall back if not writable)
-WORKSPACE_DIR_CANDIDATE="${OPENCLAW_WORKSPACE_DIR:-$OPENCLAW_DATA_DIR/workspace}"
+# Workspace directory (single source of truth: OPENCLAW_WORKSPACE_DIR)
+DEFAULT_OPENCLAW_WORKSPACE_DIR="/data/workspace"
+WORKSPACE_DIR_CANDIDATE="${OPENCLAW_WORKSPACE_DIR:-$DEFAULT_OPENCLAW_WORKSPACE_DIR}"
 mkdir -p "$WORKSPACE_DIR_CANDIDATE" 2>/dev/null || true
 if [ ! -w "$WORKSPACE_DIR_CANDIDATE" ]; then
-    OPENCLAW_WORKSPACE_DIR="$OPENCLAW_DATA_DIR/workspace"
+    OPENCLAW_WORKSPACE_DIR="/tmp/openclaw/workspace"
     mkdir -p "$OPENCLAW_WORKSPACE_DIR" 2>/dev/null || true
-    echo "[entrypoint] Workspace not writable; using $OPENCLAW_WORKSPACE_DIR"
+    echo "[entrypoint] Workspace not writable ($WORKSPACE_DIR_CANDIDATE); using $OPENCLAW_WORKSPACE_DIR"
 else
     OPENCLAW_WORKSPACE_DIR="$WORKSPACE_DIR_CANDIDATE"
 fi
 export OPENCLAW_WORKSPACE_DIR
-echo "[entrypoint] Workspace: $OPENCLAW_WORKSPACE_DIR"
+echo "[entrypoint] Workspace (resolved): $OPENCLAW_WORKSPACE_DIR"
 
 # Create directories
 mkdir -p "$OPENCLAW_STATE_DIR" "$OPENCLAW_WORKSPACE_DIR" 2>/dev/null || true
@@ -99,9 +100,80 @@ if [ "$(id -u)" -eq 0 ] && command -v su >/dev/null 2>&1; then
         chown -R node:node "$OPENCLAW_DATA_DIR" /app 2>/dev/null || true
         echo "[entrypoint] State dir: $OPENCLAW_STATE_DIR"
         echo "[entrypoint] Config path: $OPENCLAW_CONFIG_PATH"
-        echo "[entrypoint] Workspace: $OPENCLAW_WORKSPACE_DIR"
+        echo "[entrypoint] Workspace (resolved): $OPENCLAW_WORKSPACE_DIR"
     fi
 fi
+
+bootstrap_workspace_files() {
+    local workspace_dir="$OPENCLAW_WORKSPACE_DIR"
+    local script_dir template_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    template_dir="$script_dir/docs/reference/templates"
+    local required_files=( "AGENTS.md" "IDENTITY.md" "SOUL.md" "TOOLS.md" )
+    local legacy_dirs_raw="${OPENCLAW_WORKSPACE_LEGACY_DIRS:-/data/workspace,/data/.openclaw/workspace}"
+    local legacy_dirs=()
+    IFS=',' read -r -a legacy_dirs <<< "$legacy_dirs_raw"
+
+    mkdir -p "$workspace_dir" 2>/dev/null || true
+
+    for file_name in "${required_files[@]}"; do
+        local target_path="$workspace_dir/$file_name"
+        if [ -f "$target_path" ]; then
+            echo "[entrypoint] workspace_bootstrap path=$target_path status=exists"
+            continue
+        fi
+
+        local copied_from=""
+        for legacy_dir in "${legacy_dirs[@]}"; do
+            if [ "$legacy_dir" = "$workspace_dir" ]; then
+                continue
+            fi
+            if [ -f "$legacy_dir/$file_name" ]; then
+                cp "$legacy_dir/$file_name" "$target_path"
+                copied_from="$legacy_dir/$file_name"
+                echo "[entrypoint] workspace_bootstrap path=$target_path status=copied source=$copied_from"
+                break
+            fi
+        done
+        if [ -n "$copied_from" ]; then
+            continue
+        fi
+
+        if [ -f "$template_dir/$file_name" ]; then
+            cp "$template_dir/$file_name" "$target_path"
+            echo "[entrypoint] workspace_bootstrap path=$target_path status=created source=$template_dir/$file_name"
+        else
+            : > "$target_path"
+            echo "[entrypoint] workspace_bootstrap path=$target_path status=created_empty source=none"
+        fi
+    done
+
+    local skills_path="$workspace_dir/skills"
+    if [ -d "$skills_path" ]; then
+        echo "[entrypoint] workspace_bootstrap path=$skills_path status=exists"
+    else
+        local copied_skills_from=""
+        for legacy_dir in "${legacy_dirs[@]}"; do
+            if [ "$legacy_dir" = "$workspace_dir" ]; then
+                continue
+            fi
+            if [ -d "$legacy_dir/skills" ]; then
+                mkdir -p "$skills_path" 2>/dev/null || true
+                cp -R "$legacy_dir/skills/." "$skills_path/" 2>/dev/null || true
+                copied_skills_from="$legacy_dir/skills"
+                echo "[entrypoint] workspace_bootstrap path=$skills_path status=copied source=$copied_skills_from"
+                break
+            fi
+        done
+        if [ -z "$copied_skills_from" ]; then
+            mkdir -p "$skills_path" 2>/dev/null || true
+            echo "[entrypoint] workspace_bootstrap path=$skills_path status=created source=none"
+        fi
+    fi
+}
+
+bootstrap_workspace_files
+echo "[entrypoint] Workspace (active): $OPENCLAW_WORKSPACE_DIR"
 
 # Decode persisted Google login state if provided (used by Playwright/Gmail).
 GOOGLE_STATE_PATH="$OPENCLAW_STATE_DIR/google-state.json"
@@ -262,6 +334,7 @@ if (cfg.browser && cfg.browser.profiles) {
 // Defaults favor the OpenRouter auto-router; Anthropic Opus stays reserved for the Brain pipeline.
 cfg.agents = cfg.agents || {};
 cfg.agents.defaults = cfg.agents.defaults || {};
+cfg.agents.defaults.workspace = (process.env.OPENCLAW_WORKSPACE_DIR || "").trim();
 
 const primaryModel = (process.env.OPENCLAW_PRIMARY_MODEL || 'openrouter/auto').trim();
 const fallbacksRaw = (process.env.OPENCLAW_FALLBACK_MODELS || '').trim();
@@ -360,6 +433,9 @@ console.log(
 fs.mkdirSync(path.dirname(configPath), { recursive: true });
 fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2));
 console.log('[entrypoint] Config written');
+console.log(
+  `[entrypoint] Workspace config: resolved=${process.env.OPENCLAW_WORKSPACE_DIR || "<unset>"} persisted=${cfg.agents.defaults.workspace || "<unset>"}`,
+);
 if (cfg.browser && cfg.browser.profiles) {
   console.log('[entrypoint] Browser profiles:', Object.keys(cfg.browser.profiles).join(', '));
 }
@@ -400,7 +476,7 @@ NODE
     fi
 
     # Start etsy-auto-post sidecar if the built artifact exists
-    # RSS_TELEGRAM_POLLING=false — only the gateway may poll Telegram to avoid 409 conflicts
+    # RSS_TELEGRAM_POLLING=false - only the gateway may poll Telegram to avoid 409 conflicts
     ETSY_ENTRY="/app/apps/etsy-auto-post/dist/index.js"
     if [ -f "$ETSY_ENTRY" ]; then
         echo "[entrypoint] Starting etsy-auto-post sidecar (health server disabled, telegram polling disabled, gateway owns PORT)"
