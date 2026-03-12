@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import fs from "node:fs";
 import process from "node:process";
 
 function run(command, args) {
@@ -29,9 +30,29 @@ function runPnpm(args) {
 }
 
 async function main() {
-  const etsyRssUrl = process.env.ETSY_SHOP_RSS_URL?.trim();
-  if (etsyRssUrl) {
+  const explicitMode = process.env.OPENCLAW_START_MODE?.trim().toLowerCase();
+  const railwayServiceName = process.env.RAILWAY_SERVICE_NAME?.trim().toLowerCase() ?? "";
+  const etsyRssUrl = process.env.ETSY_SHOP_RSS_URL?.trim() ?? "";
+  const inferredEtsyMode =
+    etsyRssUrl.length > 0 ||
+    (process.env.RAILWAY_ENVIRONMENT &&
+      (railwayServiceName.includes("etsy") ||
+        railwayServiceName.includes("rss") ||
+        railwayServiceName.includes("autopost")));
+  const runEtsyMode = explicitMode
+    ? explicitMode === "etsy" || explicitMode === "etsy-auto-post"
+    : inferredEtsyMode;
+
+  if (runEtsyMode) {
     console.log("[openclaw start] mode=etsy-auto-post");
+    if (!fs.existsSync("apps/etsy-auto-post/dist/index.js")) {
+      console.log("[openclaw start] etsy dist missing; running build");
+      const etsyBuild = await runPnpm(["--dir", "apps/etsy-auto-post", "build"]);
+      if (!etsyBuild.ok) {
+        process.exit(etsyBuild.code);
+        return;
+      }
+    }
     const etsyStart = await runPnpm(["--dir", "apps/etsy-auto-post", "start"]);
     process.exit(etsyStart.code);
     return;
