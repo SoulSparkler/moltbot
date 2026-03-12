@@ -31,6 +31,13 @@ const ANTHROPIC_OPUS_TEMPLATE_MODEL_IDS = ["claude-opus-4-5", "claude-opus-4.5"]
 const ANTHROPIC_SONNET_46_MODEL_ID = "claude-sonnet-4-6";
 const ANTHROPIC_SONNET_46_DOT_MODEL_ID = "claude-sonnet-4.6";
 const ANTHROPIC_SONNET_TEMPLATE_MODEL_IDS = ["claude-sonnet-4-5", "claude-sonnet-4-0"] as const;
+const ANTHROPIC_UNDATED_ALIAS_TEMPLATE_IDS: Readonly<Record<string, readonly string[]>> = {
+  // Common undated Anthropic refs still seen in older configs/examples.
+  "claude-3-5-sonnet": ["claude-3-5-sonnet-20241022", "claude-3-5-sonnet-20240620"],
+  "claude-3-5-haiku": ["claude-3-5-haiku-20241022", "claude-3-5-haiku-latest"],
+  "claude-haiku-3-5": ["claude-3-5-haiku-20241022", "claude-3-5-haiku-latest"],
+  "claude-3-7-sonnet": ["claude-3-7-sonnet-latest", "claude-3-7-sonnet-20250219"],
+};
 
 function resolveOpenAICodexGpt53FallbackModel(
   provider: string,
@@ -162,6 +169,34 @@ function resolveAnthropicSonnet46ForwardCompatModel(
   return undefined;
 }
 
+function resolveAnthropicUndatedAliasModel(
+  provider: string,
+  modelId: string,
+  modelRegistry: ModelRegistry,
+): Model<Api> | undefined {
+  const normalizedProvider = normalizeProviderId(provider);
+  if (normalizedProvider !== "anthropic") {
+    return undefined;
+  }
+
+  const trimmedModelId = modelId.trim();
+  const templateIds = ANTHROPIC_UNDATED_ALIAS_TEMPLATE_IDS[trimmedModelId.toLowerCase()];
+  if (!templateIds || templateIds.length === 0) {
+    return undefined;
+  }
+
+  for (const templateId of templateIds) {
+    const template = modelRegistry.find(normalizedProvider, templateId) as Model<Api> | null;
+    if (!template) {
+      continue;
+    }
+    // Use the concrete catalog id so downstream API calls don't use ambiguous IDs.
+    return normalizeModelCompat(template);
+  }
+
+  return undefined;
+}
+
 export function buildInlineProviderModels(
   providers: Record<string, InlineProviderConfig>,
 ): InlineModelEntry[] {
@@ -238,6 +273,14 @@ export function resolveModel(
     );
     if (codexForwardCompat) {
       return { model: codexForwardCompat, authStorage, modelRegistry };
+    }
+    const anthropicUndatedAlias = resolveAnthropicUndatedAliasModel(
+      provider,
+      modelId,
+      modelRegistry,
+    );
+    if (anthropicUndatedAlias) {
+      return { model: anthropicUndatedAlias, authStorage, modelRegistry };
     }
     const anthropicForwardCompat = resolveAnthropicOpus46ForwardCompatModel(
       provider,
