@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import JSON5 from "json5";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
@@ -54,35 +55,151 @@ function pickExistingConfigPath(stateDir) {
   return null;
 }
 
-function resolveStateDirForStartup() {
+function readConfigSummary(configPath) {
+  try {
+    const raw = fs.readFileSync(configPath, "utf8");
+    const parsed = JSON5.parse(raw);
+    const agentsList = Array.isArray(parsed?.agents?.list)
+      ? parsed.agents.list.filter((entry) => entry && typeof entry === "object")
+      : [];
+    const defaultAgent = agentsList.find((entry) => entry.default === true);
+    const fallbackAgent = agentsList[0];
+    const resolvedDefaultId =
+      (typeof defaultAgent?.id === "string" && defaultAgent.id.trim()) ||
+      (typeof fallbackAgent?.id === "string" && fallbackAgent.id.trim()) ||
+      "main";
+
+    let hasNonMainAgent = false;
+    let hasNamedIdentity = false;
+    let hasJannetje = false;
+    for (const agent of agentsList) {
+      const id = typeof agent.id === "string" ? agent.id.trim().toLowerCase() : "";
+      if (id && id !== "main") {
+        hasNonMainAgent = true;
+      }
+      if (id === "jannetje") {
+        hasJannetje = true;
+      }
+      const identityName =
+        typeof agent?.identity?.name === "string" ? agent.identity.name.trim() : "";
+      if (identityName && identityName.toLowerCase() !== "assistant") {
+        hasNamedIdentity = true;
+      }
+    }
+
+    const assistantName =
+      typeof parsed?.ui?.assistant?.name === "string" ? parsed.ui.assistant.name.trim() : "";
+    if (assistantName && assistantName.toLowerCase() !== "assistant") {
+      hasNamedIdentity = true;
+    }
+
+    return {
+      ok: true,
+      agentsCount: agentsList.length,
+      hasNonMainAgent,
+      hasNamedIdentity,
+      hasJannetje,
+      defaultAgentId: resolvedDefaultId.toLowerCase(),
+    };
+  } catch {
+    return { ok: false };
+  }
+}
+
+function scoreStateCandidate(stateDir, configPath) {
+  // Prefer the directory that likely contains real user setup over freshly-created empty state.
+  let score = 0;
+  if (configPath) {
+    score += 100;
+  }
+  if (fs.existsSync(path.join(stateDir, "agents"))) {
+    score += 20;
+  }
+  const summary = configPath ? readConfigSummary(configPath) : { ok: false };
+  if (summary.ok) {
+    score += 10;
+    if (summary.agentsCount > 0) {
+      score += 40 + Math.min(summary.agentsCount, 10);
+    }
+    if (summary.hasNonMainAgent) {
+      score += 180;
+    }
+    if (summary.defaultAgentId && summary.defaultAgentId !== "main") {
+      score += 80;
+    }
+    if (summary.hasNamedIdentity) {
+      score += 220;
+    }
+    if (summary.hasJannetje) {
+      score += 400;
+    }
+  }
+  return score;
+}
+
+function resolveStartupPaths() {
   const explicit =
     process.env.OPENCLAW_STATE_DIR?.trim() ||
     process.env.CLAWDBOT_STATE_DIR?.trim() ||
     process.env.MOLTBOT_STATE_DIR?.trim() ||
     "";
+  const explicitConfigPath =
+    process.env.OPENCLAW_CONFIG_PATH?.trim() ||
+    process.env.CLAWDBOT_CONFIG_PATH?.trim() ||
+    process.env.MOLTBOT_CONFIG_PATH?.trim() ||
+    "";
+  const explicitConfigDir =
+    process.env.OPENCLAW_CONFIG_DIR?.trim() ||
+    process.env.CLAWDBOT_CONFIG_DIR?.trim() ||
+    process.env.MOLTBOT_CONFIG_DIR?.trim() ||
+    "";
+
+  if (explicitConfigPath) {
+    return {
+      stateDir: explicit || path.dirname(explicitConfigPath),
+      configPath: explicitConfigPath,
+    };
+  }
+
+  if (explicitConfigDir) {
+    return {
+      stateDir: explicit || explicitConfigDir,
+      configPath:
+        pickExistingConfigPath(explicitConfigDir) || path.join(explicitConfigDir, "openclaw.json"),
+    };
+  }
+
   if (explicit) {
-    return explicit;
+    return {
+      stateDir: explicit,
+      configPath: pickExistingConfigPath(explicit) || path.join(explicit, "openclaw.json"),
+    };
   }
 
   const candidates = ["/data/.openclaw", "/data/.clawdbot", "/data/.moltbot"];
+  let best = null;
   for (const dir of candidates) {
-    if (pickExistingConfigPath(dir)) {
-      return dir;
+    const configPath = pickExistingConfigPath(dir);
+    const score = scoreStateCandidate(dir, configPath);
+    if (!best || score > best.score) {
+      best = { stateDir: dir, configPath, score };
     }
   }
-  return "/data/.openclaw";
+  const selectedStateDir = best?.stateDir || "/data/.openclaw";
+  const selectedConfigPath =
+    best?.configPath ||
+    pickExistingConfigPath(selectedStateDir) ||
+    path.join(selectedStateDir, "openclaw.json");
+  return { stateDir: selectedStateDir, configPath: selectedConfigPath };
 }
 
 function configurePersistentPaths() {
-  const stateDir = resolveStateDirForStartup();
+  const { stateDir, configPath } = resolveStartupPaths();
   process.env.OPENCLAW_STATE_DIR = stateDir;
   process.env.CLAWDBOT_STATE_DIR = stateDir;
   process.env.MOLTBOT_STATE_DIR = stateDir;
 
-  if (!process.env.OPENCLAW_CONFIG_PATH?.trim()) {
-    process.env.OPENCLAW_CONFIG_PATH =
-      pickExistingConfigPath(stateDir) || path.join(stateDir, "openclaw.json");
-  }
+  process.env.OPENCLAW_CONFIG_PATH = process.env.OPENCLAW_CONFIG_PATH?.trim() || configPath;
 
   if (!process.env.OPENCLAW_WORKSPACE_DIR?.trim()) {
     process.env.OPENCLAW_WORKSPACE_DIR = "/data/workspace";
