@@ -67,6 +67,15 @@ async function runEtsyForeground() {
 async function main() {
   const explicitMode = process.env.OPENCLAW_START_MODE?.trim().toLowerCase();
   const railwayServiceName = process.env.RAILWAY_SERVICE_NAME?.trim().toLowerCase() ?? "";
+  const gatewayTokenHints = [
+    process.env.OPENCLAW_GATEWAY_TOKEN,
+    process.env.CLAWDBOT_GATEWAY_TOKEN,
+    process.env.MOLTBOT_GATEWAY_TOKEN,
+  ]
+    .map((value) => value?.trim() ?? "")
+    .filter(Boolean);
+  const hasGatewayHints =
+    gatewayTokenHints.length > 0 || Boolean(process.env.SETUP_PASSWORD?.trim());
   const etsyRssUrl = process.env.ETSY_SHOP_RSS_URL?.trim() ?? "";
   const inferredEtsyMode =
     etsyRssUrl.length > 0 ||
@@ -74,7 +83,8 @@ async function main() {
       (railwayServiceName.includes("etsy") ||
         railwayServiceName.includes("rss") ||
         railwayServiceName.includes("autopost")));
-  const selectedMode = explicitMode || (inferredEtsyMode ? "etsy" : "gateway");
+  const selectedMode =
+    explicitMode || (inferredEtsyMode ? (hasGatewayHints ? "all" : "etsy") : "gateway");
   const runEtsyMode = selectedMode === "etsy" || selectedMode === "etsy-auto-post";
   const runAllMode = selectedMode === "all";
 
