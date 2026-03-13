@@ -38,7 +38,6 @@ apps/ios/build
 **/*.trace
 
 # large app trees not needed for CLI build
-apps/
 !apps/etsy-auto-post/
 assets/
 Peekaboo/
