@@ -331,19 +331,39 @@ if (cfg.browser && cfg.browser.profiles) {
 }
 
 // Agent model config
-// Defaults favor the OpenRouter auto-router; Anthropic Opus stays reserved for the Brain pipeline.
+// Railway should always boot with Anthropic Sonnet 4.5 as the default model.
 cfg.agents = cfg.agents || {};
 cfg.agents.defaults = cfg.agents.defaults || {};
 cfg.agents.defaults.workspace = (process.env.OPENCLAW_WORKSPACE_DIR || "").trim();
 
-const primaryModel = (process.env.OPENCLAW_PRIMARY_MODEL || 'openrouter/auto').trim();
-const fallbacksRaw = (process.env.OPENCLAW_FALLBACK_MODELS || '').trim();
-const fallbackModels = fallbacksRaw
-  ? fallbacksRaw
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean)
-  : [];
+const primaryModel = 'anthropic/claude-sonnet-4-5';
+const fallbackModels = [];
+const isLegacyClaude35ModelRef = (value) => {
+  if (typeof value !== 'string') {
+    return false;
+  }
+  const normalized = value.trim().toLowerCase();
+  return Boolean(normalized) && normalized.includes('claude-3-5-sonnet');
+};
+const isLegacyRailwayModelRef = (value) => {
+  if (typeof value !== 'string') {
+    return false;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  return normalized.startsWith('openrouter/') || isLegacyClaude35ModelRef(normalized);
+};
+const removeLegacyRailwayFallbacks = (values) => {
+  if (!Array.isArray(values)) {
+    return [];
+  }
+  return values
+    .map((value) => (typeof value === 'string' ? value.trim() : ''))
+    .filter(Boolean)
+    .filter((value) => !isLegacyRailwayModelRef(value) && value !== primaryModel);
+};
 
 // Cap completion size by default to avoid OpenRouter credit errors; override via OPENCLAW_MAX_TOKENS or
 // OPENCLAW_PRIMARY_MAX_TOKENS. Applied only when the model entry lacks a max_tokens param.
@@ -357,27 +377,47 @@ cfg.agents.defaults.model = {
   fallbacks: fallbackModels,
 };
 
+if (Array.isArray(cfg.agents.list)) {
+  for (const agent of cfg.agents.list) {
+    if (!agent || typeof agent !== 'object') {
+      continue;
+    }
+    if (typeof agent.model === 'string') {
+      if (isLegacyRailwayModelRef(agent.model)) {
+        agent.model = primaryModel;
+      }
+      continue;
+    }
+    if (!agent.model || typeof agent.model !== 'object') {
+      continue;
+    }
+    const nextPrimary =
+      typeof agent.model.primary === 'string' ? agent.model.primary.trim() : '';
+    agent.model.primary = nextPrimary && !isLegacyRailwayModelRef(nextPrimary) ? nextPrimary : primaryModel;
+    agent.model.fallbacks = removeLegacyRailwayFallbacks(agent.model.fallbacks);
+  }
+}
+
 // Reduce accidental spend: default thinking to off unless user enables it per-session.
 cfg.agents.defaults.thinkingDefault = cfg.agents.defaults.thinkingDefault || 'off';
 
 // Enable brain -> muscle -> brain reply pipeline.
-// Brain uses high-level Anthropic reasoning only when explicitly escalated.
-// Muscle relies on the configured fallback models (prefer OpenRouter) for execution.
+// Remove stale model references from the pipeline while keeping non-legacy brain overrides.
 cfg.agents.defaults.replyPipeline = cfg.agents.defaults.replyPipeline || {};
 cfg.agents.defaults.replyPipeline.enabled = true;
-cfg.agents.defaults.replyPipeline.brainModel = (
-  process.env.OPENCLAW_BRAIN_MODEL || 'anthropic/claude-opus-4-6'
+const configuredBrainModel = (
+  process.env.OPENCLAW_BRAIN_MODEL || cfg.agents.defaults.replyPipeline.brainModel || ''
 ).trim();
-const muscleRaw = (process.env.OPENCLAW_MUSCLE_MODELS || '').trim();
-cfg.agents.defaults.replyPipeline.muscleModels = muscleRaw
-  ? muscleRaw
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean)
-  : (fallbackModels.length > 0 ? fallbackModels : [primaryModel]);
+cfg.agents.defaults.replyPipeline.brainModel =
+  configuredBrainModel && !isLegacyRailwayModelRef(configuredBrainModel)
+    ? configuredBrainModel
+    : primaryModel;
+cfg.agents.defaults.replyPipeline.muscleModels = [primaryModel];
 
 // Ensure all referenced models have a config entry so alias/indexing and per-model options work.
-cfg.agents.defaults.models = cfg.agents.defaults.models || {};
+cfg.agents.defaults.models = Object.fromEntries(
+  Object.entries(cfg.agents.defaults.models || {}).filter(([ref]) => !isLegacyClaude35ModelRef(ref)),
+);
 for (const ref of [
   primaryModel,
   ...(cfg.agents.defaults.model.fallbacks || []),
@@ -415,7 +455,7 @@ for (const ref of [
 
 const muscleModels = cfg.agents.defaults.replyPipeline.muscleModels || [];
 const muscleList = muscleModels.length > 0 ? muscleModels.join(', ') : primaryModel;
-const fallbackLabel = fallbackModels.length > 0 ? fallbackModels.join(', ') : 'none';
+const fallbackLabel = 'none';
 const openRouterKeyState = process.env.OPENROUTER_API_KEY?.trim() ? 'set' : 'missing';
 const anthropicKeyState = process.env.ANTHROPIC_API_KEY?.trim() ? 'set' : 'missing';
 const openRouterMaxTokensLabel = defaultMaxTokens;
