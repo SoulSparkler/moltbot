@@ -126,6 +126,11 @@ export type LinkToolsConfig = {
   models?: LinkModelConfig[];
 };
 
+export type MetaSocialToolsConfig = {
+  /** Enable the built-in Meta publishing tool for explicit Facebook/Instagram posts. */
+  enabled?: boolean;
+};
+
 export type MediaToolsConfig = {
   /** Shared model list applied across image/audio/video. */
   models?: MediaUnderstandingModelConfig[];
@@ -400,6 +405,7 @@ export type ToolsConfig = {
   };
   media?: MediaToolsConfig;
   links?: LinkToolsConfig;
+  metaSocial?: MetaSocialToolsConfig;
   /** Message tool configuration. */
   message?: {
     /**
