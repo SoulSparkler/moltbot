@@ -74,21 +74,8 @@ function resolveChannelConfig(
   return isRecord(entry) ? entry : null;
 }
 
-function isTelegramConfigured(cfg: OpenClawConfig, env: NodeJS.ProcessEnv): boolean {
-  if (hasNonEmptyString(env.TELEGRAM_BOT_TOKEN)) {
-    return true;
-  }
-  const entry = resolveChannelConfig(cfg, "telegram");
-  if (!entry) {
-    return false;
-  }
-  if (hasNonEmptyString(entry.botToken) || hasNonEmptyString(entry.tokenFile)) {
-    return true;
-  }
-  if (accountsHaveKeys(entry.accounts, ["botToken", "tokenFile"])) {
-    return true;
-  }
-  return recordHasKeys(entry);
+function isTelegramConfigured(_cfg: OpenClawConfig, env: NodeJS.ProcessEnv): boolean {
+  return hasNonEmptyString(env.TELEGRAM_BOT_TOKEN);
 }
 
 function isDiscordConfigured(cfg: OpenClawConfig, env: NodeJS.ProcessEnv): boolean {

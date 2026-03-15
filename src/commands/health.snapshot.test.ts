@@ -75,8 +75,9 @@ describe("getHealthSnapshot", () => {
   });
 
   it("probes telegram getMe + webhook info when configured", async () => {
-    testConfig = { channels: { telegram: { botToken: "t-1" } } };
+    testConfig = { channels: { telegram: {} } };
     testStore = {};
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", "t-1");
     vi.stubEnv("DISCORD_BOT_TOKEN", "");
 
     const calls: string[] = [];
@@ -132,65 +133,35 @@ describe("getHealthSnapshot", () => {
     expect(calls.some((c) => c.includes("/getWebhookInfo"))).toBe(true);
   });
 
-  it("treats telegram.tokenFile as configured", async () => {
+  it("ignores telegram config token fallback sources when env is missing", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-health-"));
     const tokenFile = path.join(tmpDir, "telegram-token");
     fs.writeFileSync(tokenFile, "t-file\n", "utf-8");
-    testConfig = { channels: { telegram: { tokenFile } } };
+    testConfig = { channels: { telegram: { botToken: "t-config", tokenFile } } };
     testStore = {};
     vi.stubEnv("TELEGRAM_BOT_TOKEN", "");
 
-    const calls: string[] = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (url: string) => {
-        calls.push(url);
-        if (url.includes("/getMe")) {
-          return {
-            ok: true,
-            status: 200,
-            json: async () => ({
-              ok: true,
-              result: { id: 1, username: "bot" },
-            }),
-          } as unknown as Response;
-        }
-        if (url.includes("/getWebhookInfo")) {
-          return {
-            ok: true,
-            status: 200,
-            json: async () => ({
-              ok: true,
-              result: {
-                url: "https://example.com/h",
-                has_custom_certificate: false,
-              },
-            }),
-          } as unknown as Response;
-        }
-        return {
-          ok: false,
-          status: 404,
-          json: async () => ({ ok: false, description: "nope" }),
-        } as unknown as Response;
-      }),
-    );
+    const fetchSpy = vi.fn(async () => {
+      throw new Error("telegram probe should be skipped");
+    });
+    vi.stubGlobal("fetch", fetchSpy);
 
     const snap = await getHealthSnapshot({ timeoutMs: 25 });
     const telegram = snap.channels.telegram as {
       configured?: boolean;
-      probe?: { ok?: boolean };
+      probe?: unknown;
     };
-    expect(telegram.configured).toBe(true);
-    expect(telegram.probe?.ok).toBe(true);
-    expect(calls.some((c) => c.includes("bott-file/getMe"))).toBe(true);
+    expect(telegram.configured).toBe(false);
+    expect(telegram.probe).toBeUndefined();
+    expect(fetchSpy).not.toHaveBeenCalled();
 
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
   it("returns a structured telegram probe error when getMe fails", async () => {
-    testConfig = { channels: { telegram: { botToken: "bad-token" } } };
+    testConfig = { channels: { telegram: {} } };
     testStore = {};
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", "bad-token");
     vi.stubEnv("DISCORD_BOT_TOKEN", "");
 
     vi.stubGlobal(
@@ -219,8 +190,9 @@ describe("getHealthSnapshot", () => {
   });
 
   it("captures unexpected probe exceptions as errors", async () => {
-    testConfig = { channels: { telegram: { botToken: "t-err" } } };
+    testConfig = { channels: { telegram: {} } };
     testStore = {};
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", "t-err");
     vi.stubEnv("DISCORD_BOT_TOKEN", "");
 
     vi.stubGlobal(

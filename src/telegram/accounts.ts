@@ -85,15 +85,17 @@ function mergeTelegramAccountConfig(cfg: OpenClawConfig, accountId: string): Tel
 export function resolveTelegramAccount(params: {
   cfg: OpenClawConfig;
   accountId?: string | null;
+  tokenMode?: "legacy" | "envOnly";
 }): ResolvedTelegramAccount {
   const hasExplicitAccountId = Boolean(params.accountId?.trim());
   const baseEnabled = params.cfg.channels?.telegram?.enabled !== false;
+  const tokenMode = params.tokenMode ?? "legacy";
 
   const resolve = (accountId: string) => {
     const merged = mergeTelegramAccountConfig(params.cfg, accountId);
     const accountEnabled = merged.enabled !== false;
     const enabled = baseEnabled && accountEnabled;
-    const tokenResolution = resolveTelegramToken(params.cfg, { accountId });
+    const tokenResolution = resolveTelegramToken(params.cfg, { accountId, mode: tokenMode });
     debugAccounts("resolve", {
       accountId,
       enabled,
@@ -114,13 +116,15 @@ export function resolveTelegramAccount(params: {
   if (hasExplicitAccountId) {
     return primary;
   }
+  if (tokenMode === "envOnly") {
+    return primary;
+  }
   if (primary.tokenSource !== "none") {
     return primary;
   }
 
-  // If accountId is omitted, prefer a configured account token over failing on
-  // the implicit "default" account. This keeps env-based setups working while
-  // making config-only tokens work for things like heartbeats.
+  // Legacy token resolution prefers a configured account token over failing on
+  // the implicit "default" account.
   const fallbackId = resolveDefaultTelegramAccountId(params.cfg);
   if (fallbackId === primary.accountId) {
     return primary;

@@ -34,6 +34,30 @@ describe("resolveTelegramToken", () => {
     expect(res.source).toBe("env");
   });
 
+  it("envOnly mode ignores config token and tokenFile fallback sources", () => {
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", "");
+    const dir = withTempDir();
+    const tokenFile = path.join(dir, "token.txt");
+    fs.writeFileSync(tokenFile, "file-token\n", "utf-8");
+    const cfg = {
+      channels: { telegram: { botToken: "cfg-token", tokenFile } },
+    } as OpenClawConfig;
+    const res = resolveTelegramToken(cfg, { mode: "envOnly" });
+    expect(res.token).toBe("");
+    expect(res.source).toBe("none");
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("envOnly mode uses TELEGRAM_BOT_TOKEN for the default account", () => {
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", "env-token");
+    const cfg = {
+      channels: { telegram: { botToken: "cfg-token" } },
+    } as OpenClawConfig;
+    const res = resolveTelegramToken(cfg, { mode: "envOnly" });
+    expect(res.token).toBe("env-token");
+    expect(res.source).toBe("env");
+  });
+
   it("uses tokenFile when configured", () => {
     vi.stubEnv("TELEGRAM_BOT_TOKEN", "");
     const dir = withTempDir();
@@ -85,5 +109,16 @@ describe("resolveTelegramToken", () => {
     const res = resolveTelegramToken(cfg, { accountId: "careynotifications" });
     expect(res.token).toBe("acct-token");
     expect(res.source).toBe("config");
+  });
+
+  it("envOnly mode does not expose TELEGRAM_BOT_TOKEN to non-default accounts", () => {
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", "env-token");
+    const cfg = { channels: { telegram: {} } } as OpenClawConfig;
+    const res = resolveTelegramToken(cfg, {
+      accountId: "careynotifications",
+      mode: "envOnly",
+    });
+    expect(res.token).toBe("");
+    expect(res.source).toBe("none");
   });
 });

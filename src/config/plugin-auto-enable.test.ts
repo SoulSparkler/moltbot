@@ -2,6 +2,26 @@ import { describe, expect, it } from "vitest";
 import { applyPluginAutoEnable } from "./plugin-auto-enable.js";
 
 describe("applyPluginAutoEnable", () => {
+  it("only auto-configures telegram when TELEGRAM_BOT_TOKEN is present", () => {
+    const missingEnv = applyPluginAutoEnable({
+      config: {
+        channels: { telegram: { botToken: "123:abc" } },
+      },
+      env: {},
+    });
+    expect(missingEnv.config.plugins?.entries?.telegram?.enabled).toBeUndefined();
+    expect(missingEnv.changes).toEqual([]);
+
+    const withEnv = applyPluginAutoEnable({
+      config: {
+        channels: { telegram: { groups: { "*": { requireMention: false } } } },
+      },
+      env: { TELEGRAM_BOT_TOKEN: "123:abc" },
+    });
+    expect(withEnv.config.plugins?.entries?.telegram?.enabled).toBe(false);
+    expect(withEnv.changes.join("\n")).toContain("Telegram configured, not enabled yet.");
+  });
+
   it("configures channel plugins with disabled state and updates allowlist", () => {
     const result = applyPluginAutoEnable({
       config: {

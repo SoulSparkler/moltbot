@@ -94,4 +94,27 @@ describe("resolveTelegramAccount", () => {
       }
     }
   });
+
+  it("envOnly mode does not fall back to configured account tokens", () => {
+    const prevTelegramToken = process.env.TELEGRAM_BOT_TOKEN;
+    process.env.TELEGRAM_BOT_TOKEN = "";
+    try {
+      const cfg: OpenClawConfig = {
+        channels: {
+          telegram: { accounts: { work: { botToken: "tok-work" } } },
+        },
+      };
+
+      const account = resolveTelegramAccount({ cfg, tokenMode: "envOnly" });
+      expect(account.accountId).toBe("default");
+      expect(account.tokenSource).toBe("none");
+      expect(account.token).toBe("");
+    } finally {
+      if (prevTelegramToken === undefined) {
+        delete process.env.TELEGRAM_BOT_TOKEN;
+      } else {
+        process.env.TELEGRAM_BOT_TOKEN = prevTelegramToken;
+      }
+    }
+  });
 });

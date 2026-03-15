@@ -14,7 +14,16 @@ type ResolveTelegramTokenOpts = {
   envToken?: string | null;
   accountId?: string | null;
   logMissingFile?: (message: string) => void;
+  mode?: "legacy" | "envOnly";
 };
+
+function resolveTelegramEnvToken(opts: ResolveTelegramTokenOpts, allowEnv: boolean) {
+  const envToken = allowEnv ? (opts.envToken ?? process.env.TELEGRAM_BOT_TOKEN)?.trim() : "";
+  if (envToken) {
+    return { token: envToken, source: "env" } satisfies TelegramTokenResolution;
+  }
+  return { token: "", source: "none" } satisfies TelegramTokenResolution;
+}
 
 export function resolveTelegramToken(
   cfg?: OpenClawConfig,
@@ -22,6 +31,13 @@ export function resolveTelegramToken(
 ): TelegramTokenResolution {
   const accountId = normalizeAccountId(opts.accountId);
   const telegramCfg = cfg?.channels?.telegram;
+  const allowEnv = accountId === DEFAULT_ACCOUNT_ID;
+
+  // Gateway startup/probes can opt into env-only resolution so persisted config
+  // tokens do not keep Telegram alive after TELEGRAM_BOT_TOKEN is removed.
+  if (opts.mode === "envOnly") {
+    return resolveTelegramEnvToken(opts, allowEnv);
+  }
 
   // Account IDs are normalized for routing (e.g. lowercased). Config keys may not
   // be normalized, so resolve per-account config by matching normalized IDs.
@@ -70,7 +86,6 @@ export function resolveTelegramToken(
     return { token: accountToken, source: "config" };
   }
 
-  const allowEnv = accountId === DEFAULT_ACCOUNT_ID;
   const tokenFile = telegramCfg?.tokenFile?.trim();
   if (tokenFile && allowEnv) {
     if (!fs.existsSync(tokenFile)) {
@@ -93,10 +108,5 @@ export function resolveTelegramToken(
     return { token: configToken, source: "config" };
   }
 
-  const envToken = allowEnv ? (opts.envToken ?? process.env.TELEGRAM_BOT_TOKEN)?.trim() : "";
-  if (envToken) {
-    return { token: envToken, source: "env" };
-  }
-
-  return { token: "", source: "none" };
+  return resolveTelegramEnvToken(opts, allowEnv);
 }

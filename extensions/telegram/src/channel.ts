@@ -68,6 +68,19 @@ function parseThreadId(threadId?: string | number | null) {
   const parsed = Number.parseInt(trimmed, 10);
   return Number.isFinite(parsed) ? parsed : undefined;
 }
+
+function hasTelegramEnvToken() {
+  return Boolean(process.env.TELEGRAM_BOT_TOKEN?.trim());
+}
+
+function listRuntimeTelegramAccountIds(cfg: OpenClawConfig) {
+  const ids = listTelegramAccountIds(cfg);
+  if (!hasTelegramEnvToken() || ids.includes(DEFAULT_ACCOUNT_ID)) {
+    return ids;
+  }
+  return [DEFAULT_ACCOUNT_ID, ...ids];
+}
+
 export const telegramPlugin: ChannelPlugin<ResolvedTelegramAccount, TelegramProbe> = {
   id: "telegram",
   meta: {
@@ -79,7 +92,9 @@ export const telegramPlugin: ChannelPlugin<ResolvedTelegramAccount, TelegramProb
     idLabel: "telegramUserId",
     normalizeAllowEntry: (entry) => entry.replace(/^(telegram|tg):/i, ""),
     notifyApproval: async ({ cfg, id }) => {
-      const { token } = getTelegramRuntime().channel.telegram.resolveTelegramToken(cfg);
+      const { token } = getTelegramRuntime().channel.telegram.resolveTelegramToken(cfg, {
+        mode: "envOnly",
+      });
       if (!token) {
         throw new Error("telegram token not configured");
       }
@@ -103,9 +118,11 @@ export const telegramPlugin: ChannelPlugin<ResolvedTelegramAccount, TelegramProb
   reload: { configPrefixes: ["channels.telegram"] },
   configSchema: buildChannelConfigSchema(TelegramConfigSchema),
   config: {
-    listAccountIds: (cfg) => listTelegramAccountIds(cfg),
-    resolveAccount: (cfg, accountId) => resolveTelegramAccount({ cfg, accountId }),
-    defaultAccountId: (cfg) => resolveDefaultTelegramAccountId(cfg),
+    listAccountIds: (cfg) => listRuntimeTelegramAccountIds(cfg),
+    resolveAccount: (cfg, accountId) =>
+      resolveTelegramAccount({ cfg, accountId, tokenMode: "envOnly" }),
+    defaultAccountId: (cfg) =>
+      hasTelegramEnvToken() ? DEFAULT_ACCOUNT_ID : resolveDefaultTelegramAccountId(cfg),
     setAccountEnabled: ({ cfg, accountId, enabled }) =>
       setAccountEnabledInConfigSection({
         cfg,
@@ -122,6 +139,7 @@ export const telegramPlugin: ChannelPlugin<ResolvedTelegramAccount, TelegramProb
         clearBaseFields: ["botToken", "tokenFile", "name"],
       }),
     isConfigured: (account) => Boolean(account.token?.trim()),
+    unconfiguredReason: () => "not configured (set TELEGRAM_BOT_TOKEN)",
     describeAccount: (account) => ({
       accountId: account.accountId,
       name: account.name,
@@ -497,6 +515,7 @@ export const telegramPlugin: ChannelPlugin<ResolvedTelegramAccount, TelegramProb
       const resolved = resolveTelegramAccount({
         cfg: changed ? nextCfg : cfg,
         accountId,
+        tokenMode: "envOnly",
       });
       const loggedOut = resolved.tokenSource === "none";
       if (changed) {
