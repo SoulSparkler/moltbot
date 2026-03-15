@@ -48,6 +48,7 @@ function sleep(ms) {
 }
 
 const LEGACY_CONFIG_FILES = ["openclaw.json", "clawdbot.json", "moltbot.json"];
+const RAILWAY_PRIMARY_MODEL = "anthropic/claude-sonnet-4-5";
 
 function pickExistingConfigPath(stateDir) {
   for (const file of LEGACY_CONFIG_FILES) {
@@ -225,6 +226,132 @@ function configurePersistentPaths() {
   );
 }
 
+function isRailwayRuntime() {
+  return [
+    process.env.RAILWAY_ENVIRONMENT,
+    process.env.RAILWAY_PROJECT_ID,
+    process.env.RAILWAY_SERVICE_ID,
+    process.env.RAILWAY_SERVICE_NAME,
+  ].some((value) => Boolean(value?.trim()));
+}
+
+function isLegacyClaude35ModelRef(value) {
+  if (typeof value !== "string") {
+    return false;
+  }
+  const normalized = value.trim().toLowerCase();
+  return Boolean(normalized) && normalized.includes("claude-3-5-sonnet");
+}
+
+function isLegacyRailwayModelRef(value) {
+  if (typeof value !== "string") {
+    return false;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  return normalized.startsWith("openrouter/") || isLegacyClaude35ModelRef(normalized);
+}
+
+function removeLegacyRailwayFallbacks(values) {
+  if (!Array.isArray(values)) {
+    return [];
+  }
+  return values
+    .map((value) => (typeof value === "string" ? value.trim() : ""))
+    .filter(Boolean)
+    .filter((value) => !isLegacyRailwayModelRef(value) && value !== RAILWAY_PRIMARY_MODEL);
+}
+
+function normalizeRailwayGatewayModels() {
+  if (!isRailwayRuntime()) {
+    return;
+  }
+
+  const configPath = process.env.OPENCLAW_CONFIG_PATH?.trim();
+  if (!configPath) {
+    return;
+  }
+
+  let cfg = {};
+  try {
+    cfg = JSON5.parse(fs.readFileSync(configPath, "utf8"));
+  } catch {
+    cfg = {};
+  }
+
+  if (!cfg || typeof cfg !== "object") {
+    cfg = {};
+  }
+
+  cfg.agents = cfg.agents && typeof cfg.agents === "object" ? cfg.agents : {};
+  cfg.agents.defaults =
+    cfg.agents.defaults && typeof cfg.agents.defaults === "object" ? cfg.agents.defaults : {};
+  cfg.agents.defaults.model = {
+    primary: RAILWAY_PRIMARY_MODEL,
+    fallbacks: [],
+  };
+
+  if (Array.isArray(cfg.agents.list)) {
+    for (const agent of cfg.agents.list) {
+      if (!agent || typeof agent !== "object") {
+        continue;
+      }
+      if (typeof agent.model === "string") {
+        if (isLegacyRailwayModelRef(agent.model)) {
+          agent.model = RAILWAY_PRIMARY_MODEL;
+        }
+        continue;
+      }
+      if (!agent.model || typeof agent.model !== "object") {
+        continue;
+      }
+      const nextPrimary = typeof agent.model.primary === "string" ? agent.model.primary.trim() : "";
+      agent.model.primary =
+        nextPrimary && !isLegacyRailwayModelRef(nextPrimary) ? nextPrimary : RAILWAY_PRIMARY_MODEL;
+      agent.model.fallbacks = removeLegacyRailwayFallbacks(agent.model.fallbacks);
+    }
+  }
+
+  cfg.agents.defaults.replyPipeline =
+    cfg.agents.defaults.replyPipeline && typeof cfg.agents.defaults.replyPipeline === "object"
+      ? cfg.agents.defaults.replyPipeline
+      : {};
+  const configuredBrainModel = (
+    process.env.OPENCLAW_BRAIN_MODEL ||
+    cfg.agents.defaults.replyPipeline.brainModel ||
+    ""
+  ).trim();
+  cfg.agents.defaults.replyPipeline.brainModel =
+    configuredBrainModel && !isLegacyRailwayModelRef(configuredBrainModel)
+      ? configuredBrainModel
+      : RAILWAY_PRIMARY_MODEL;
+  cfg.agents.defaults.replyPipeline.muscleModels = [RAILWAY_PRIMARY_MODEL];
+
+  cfg.agents.defaults.models = Object.fromEntries(
+    Object.entries(cfg.agents.defaults.models || {}).filter(
+      ([ref]) => !isLegacyClaude35ModelRef(ref),
+    ),
+  );
+  for (const ref of [
+    RAILWAY_PRIMARY_MODEL,
+    ...(cfg.agents.defaults.model.fallbacks || []),
+    cfg.agents.defaults.replyPipeline.brainModel,
+    ...(cfg.agents.defaults.replyPipeline.muscleModels || []),
+  ]) {
+    if (typeof ref === "string" && ref.trim()) {
+      cfg.agents.defaults.models[ref.trim()] = cfg.agents.defaults.models[ref.trim()] || {};
+    }
+  }
+
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2));
+  console.log(
+    `[openclaw start] Railway model defaults: primary=${RAILWAY_PRIMARY_MODEL} fallbacks=none`,
+  );
+}
+
 async function ensureEtsyBuild() {
   if (fs.existsSync("apps/etsy-auto-post/dist/index.js")) {
     return { ok: true, code: 0 };
@@ -281,6 +408,8 @@ async function runGateway() {
   if (!bootstrap.ok) {
     return bootstrap;
   }
+
+  normalizeRailwayGatewayModels();
 
   const gatewayToken = ensureGatewayToken();
   const gatewayPort = resolveGatewayPort();
