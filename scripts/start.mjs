@@ -351,11 +351,34 @@ function normalizeRailwayGatewayModels() {
     cfg.tools.metaSocial && typeof cfg.tools.metaSocial === "object" ? cfg.tools.metaSocial : {};
   cfg.tools.metaSocial.enabled = true;
 
+  // Ensure Jannetje agent entry is always present with the correct identity and emoji.
+  if (!Array.isArray(cfg.agents.list)) {
+    cfg.agents.list = [];
+  }
+  let jannetje = cfg.agents.list.find((a) => a && typeof a === "object" && a.id === "jannetje");
+  if (!jannetje) {
+    jannetje = { id: "jannetje" };
+    cfg.agents.list.push(jannetje);
+  }
+  jannetje.default = true;
+  jannetje.name = "Jannetje";
+  jannetje.identity = { name: "Jannetje", emoji: "🧡" };
+  if (!jannetje.workspace) {
+    jannetje.workspace = process.env.OPENCLAW_WORKSPACE_DIR || "/data/workspace";
+  }
+  // Remove default flag from other agents.
+  for (const agent of cfg.agents.list) {
+    if (agent && typeof agent === "object" && agent.id !== "jannetje") {
+      delete agent.default;
+    }
+  }
+
   fs.mkdirSync(path.dirname(configPath), { recursive: true });
   fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2));
   console.log(
     `[openclaw start] Railway model defaults: primary=${RAILWAY_PRIMARY_MODEL} fallbacks=none`,
   );
+  console.log("[openclaw start] Jannetje identity: name=Jannetje emoji=🧡");
 }
 
 async function ensureEtsyBuild() {
