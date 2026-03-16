@@ -204,7 +204,8 @@ describe("trigger handling", () => {
       expect(text).toBe("hello");
       expect(runEmbeddedPiAgent).toHaveBeenCalledOnce();
       const prompt = vi.mocked(runEmbeddedPiAgent).mock.calls[0]?.[0]?.prompt ?? "";
-      expect(prompt).toContain("A new session was started via /new or /reset");
+      expect(prompt).toContain("Do not say you are blank, newly online, waiting to be named");
+      expect(prompt).not.toContain("default_model");
     });
   });
 });
