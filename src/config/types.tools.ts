@@ -131,6 +131,15 @@ export type MetaSocialToolsConfig = {
   enabled?: boolean;
 };
 
+export type EtsyAutoPostToolsConfig = {
+  /** Enable the built-in Etsy autopost bridge tool. */
+  enabled?: boolean;
+  /** Base URL for the etsy-auto-post service (for example https://etsy.example.com). */
+  baseUrl?: string;
+  /** Optional bearer token for the etsy-auto-post service. */
+  token?: string;
+};
+
 export type MediaToolsConfig = {
   /** Shared model list applied across image/audio/video. */
   models?: MediaUnderstandingModelConfig[];
@@ -406,6 +415,7 @@ export type ToolsConfig = {
   media?: MediaToolsConfig;
   links?: LinkToolsConfig;
   metaSocial?: MetaSocialToolsConfig;
+  etsyAutoPost?: EtsyAutoPostToolsConfig;
   /** Message tool configuration. */
   message?: {
     /**

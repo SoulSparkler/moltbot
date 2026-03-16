@@ -234,6 +234,8 @@ export function buildAgentSystemPrompt(params: {
     nodes: "List/describe/notify/camera/screen on paired nodes",
     cron: "Manage cron jobs and wake events (use for reminders; when scheduling a reminder, write the systemEvent text as something that will read like a reminder when it fires, and mention that it is a reminder depending on the time gap between setting and firing; include recent context in reminder text if appropriate)",
     message: "Send messages and channel actions",
+    etsy_auto_post:
+      "Check the Etsy autopost service, inspect listing diagnostics, or trigger a manual Etsy listing autopost run",
     gateway: "Restart, apply config, or run updates on the running OpenClaw process",
     agents_list: "List agent ids allowed for sessions_spawn",
     sessions_list: "List other sessions (incl. sub-agents) with filters/last",
@@ -262,6 +264,7 @@ export function buildAgentSystemPrompt(params: {
     "nodes",
     "cron",
     "message",
+    "etsy_auto_post",
     "gateway",
     "agents_list",
     "sessions_list",

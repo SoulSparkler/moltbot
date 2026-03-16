@@ -1009,7 +1009,7 @@ export function createMetaSocialTool(options?: { config?: OpenClawConfig }): Any
     label: "Meta Social",
     name: "meta_social",
     description:
-      "Check Meta setup or publish directly to a Facebook Page and/or its linked Instagram Business account. Only use when the user explicitly asks to post. Requires META_PAGE_ID plus META_ACCESS_TOKEN or META_PAGE_ACCESS_TOKEN.",
+      "Check Meta setup or publish a direct custom Facebook Page and/or linked Instagram Business post. Use etsy_auto_post for Etsy listing autoposts. Requires META_PAGE_ID plus META_ACCESS_TOKEN or META_PAGE_ACCESS_TOKEN.",
     parameters: MetaSocialToolSchema,
     execute: async (_toolCallId, args) => {
       try {

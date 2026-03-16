@@ -182,6 +182,9 @@ const FIELD_LABELS: Record<string, string> = {
   "tools.exec.pathPrepend": "Exec PATH Prepend",
   "tools.exec.safeBins": "Exec Safe Bins",
   "tools.metaSocial.enabled": "Enable Meta Social Tool",
+  "tools.etsyAutoPost.enabled": "Enable Etsy Auto Post Tool",
+  "tools.etsyAutoPost.baseUrl": "Etsy Auto Post Base URL",
+  "tools.etsyAutoPost.token": "Etsy Auto Post Token",
   "tools.message.allowCrossContextSend": "Allow Cross-Context Messaging",
   "tools.message.crossContext.allowWithinProvider": "Allow Cross-Context (Same Provider)",
   "tools.message.crossContext.allowAcrossProviders": "Allow Cross-Context (Across Providers)",
@@ -475,6 +478,11 @@ const FIELD_HELP: Record<string, string> = {
     "Allow stdin-only safe binaries to run without explicit allowlist entries.",
   "tools.metaSocial.enabled":
     "Enable the built-in meta_social tool for direct Facebook/Instagram publishing.",
+  "tools.etsyAutoPost.enabled":
+    "Enable the built-in etsy_auto_post tool for Etsy listing autopost status and manual runs.",
+  "tools.etsyAutoPost.baseUrl":
+    "Base URL of the etsy-auto-post service (for example https://etsy.example.com).",
+  "tools.etsyAutoPost.token": "Optional bearer token used when calling the etsy-auto-post service.",
   "tools.message.allowCrossContextSend":
     "Legacy override: allow cross-context sends across all providers.",
   "tools.message.crossContext.allowWithinProvider":

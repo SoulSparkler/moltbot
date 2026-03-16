@@ -490,6 +490,14 @@ export const ToolsSchema = z
       })
       .strict()
       .optional(),
+    etsyAutoPost: z
+      .object({
+        enabled: z.boolean().optional(),
+        baseUrl: z.string().optional(),
+        token: z.string().optional(),
+      })
+      .strict()
+      .optional(),
     message: z
       .object({
         allowCrossContextSend: z.boolean().optional(),

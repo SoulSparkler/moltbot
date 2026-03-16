@@ -23,7 +23,6 @@ import {
 } from "./lib/etsy.js";
 import {
   sanitizeInstagramImageUrl,
-  validateInstagramImage,
   probeImageDimensions,
   isInstagramSafeAspectRatio,
   padImageForInstagram,
@@ -71,6 +70,8 @@ const RSS_TRANSLATION_OPENAI_MODEL =
 const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN?.trim() ?? "";
 const META_PAGE_ACCESS_TOKEN = process.env.META_PAGE_ACCESS_TOKEN?.trim() ?? "";
 const META_PAGE_ID = process.env.META_PAGE_ID?.trim() ?? "";
+const ETSY_AUTO_POST_TOKEN =
+  process.env.ETSY_AUTO_POST_TOKEN?.trim() ?? process.env.RSS_API_TOKEN?.trim() ?? "";
 const FACEBOOK_ENABLED_TOGGLE = resolveBooleanToggle("FACEBOOK_ENABLED", "RSS_FACEBOOK_ENABLED");
 const INSTAGRAM_ENABLED_TOGGLE = resolveBooleanToggle("INSTAGRAM_ENABLED", "RSS_INSTAGRAM_ENABLED");
 const FACEBOOK_ENABLED = FACEBOOK_ENABLED_TOGGLE.enabled;
@@ -114,6 +115,47 @@ const IGNORE_DEDUPE =
 const POST_SPACING_SECONDS = Math.max(0, toNumberOrUndefined(process.env.POST_SPACING_SECONDS) ?? 0);
 const SHARE_AND_SAVE_MEDIUM = "organic";
 const SHARE_AND_SAVE_CAMPAIGN = "autopost";
+
+function sendJsonResponse(
+  res: {
+    writeHead: (statusCode: number, headers: Record<string, string>) => void;
+    end: (body?: string) => void;
+    writableEnded?: boolean;
+  },
+  statusCode: number,
+  payload: unknown,
+): void {
+  if (res.writableEnded) {
+    return;
+  }
+  res.writeHead(statusCode, { "content-type": "application/json; charset=utf-8" });
+  res.end(JSON.stringify(payload));
+}
+
+function readApiTokenFromRequest(req: {
+  headers: Record<string, string | string[] | undefined>;
+}): string {
+  const authHeader = req.headers.authorization;
+  const authValue = Array.isArray(authHeader) ? authHeader[0] : authHeader;
+  const bearerMatch = typeof authValue === "string" ? authValue.match(/^Bearer\s+(.+)$/i) : null;
+  if (bearerMatch?.[1]) {
+    return bearerMatch[1].trim();
+  }
+  const headerToken = req.headers["x-etsy-auto-post-token"] ?? req.headers["x-api-key"];
+  if (Array.isArray(headerToken)) {
+    return String(headerToken[0] ?? "").trim();
+  }
+  return typeof headerToken === "string" ? headerToken.trim() : "";
+}
+
+function requestHasApiAccess(req: {
+  headers: Record<string, string | string[] | undefined>;
+}): boolean {
+  if (!ETSY_AUTO_POST_TOKEN) {
+    return true;
+  }
+  return readApiTokenFromRequest(req) === ETSY_AUTO_POST_TOKEN;
+}
 
 export function buildShareAndSaveUrl(
   listingUrl: string,
@@ -3824,8 +3866,7 @@ async function main(): Promise<void> {
         } satisfies BuildInfo);
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
       if (url.pathname === "/health") {
-        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ ok: true }));
+        sendJsonResponse(res, 200, { ok: true });
         return;
       }
       // Serve padded Instagram images from in-memory temp store
@@ -3841,8 +3882,7 @@ async function main(): Promise<void> {
           });
           res.end(tempImg.buffer);
         } else {
-          res.writeHead(404, { "content-type": "application/json; charset=utf-8" });
-          res.end(JSON.stringify({ error: "not_found" }));
+          sendJsonResponse(res, 404, { error: "not_found" });
         }
         return;
       }
@@ -3856,50 +3896,45 @@ async function main(): Promise<void> {
             error: `meta_healthcheck_failed:${String(error)}`,
           }));
           const fbStatus = resolveFacebookEnablement();
-          res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-          res.end(
-            JSON.stringify({
-              ok: true,
-              service: SERVICE_NAME,
-              build: buildForResponse,
-              config: {
-                cwd: process.cwd(),
-                statePath: STATE_PATH,
-                stateDir: dirname(STATE_PATH),
-                rssUrl: ETSY_SHOP_RSS_URL || null,
-                rssUrlPresent: Boolean(ETSY_SHOP_RSS_URL),
-                facebookEnabled: fbStatus.enabled,
-                facebookReason: fbStatus.reason ?? null,
-                facebookMissingEnv: fbStatus.missingEnv ?? [],
-                instagramEnabled: INSTAGRAM_ENABLED,
-                maxPostsPerDay: MAX_POSTS_PER_DAY,
-                minPostIntervalHours: MIN_POST_INTERVAL_HOURS,
-                dedupeDays: DEDUPE_DAYS,
-                ignoreDedupe: IGNORE_DEDUPE,
-                checkIntervalMs: CHECK_INTERVAL_MS,
-                telegramPollingEnabled: TELEGRAM_POLLING_ENABLED,
-                rssInstagramImageOverride: RSS_INSTAGRAM_IMAGE_URL_OVERRIDE || null,
-                rssInstagramTestImage: RSS_INSTAGRAM_TEST_IMAGE_URL || null,
-                pinterestTestMode: PINTEREST_TEST_MODE,
-              },
-              meta: {
-                accessTokenPresent: Boolean(META_ACCESS_TOKEN),
-                pageAccessTokenPresent: Boolean(META_PAGE_ACCESS_TOKEN),
-                pageId: META_PAGE_ID || null,
-                pageAccessOk: metaStatus.page_access_ok,
-                pageIdFound: metaStatus.page_id_found,
-                igLinked: metaStatus.ig_linked,
-                requiredPermissions: META_REQUIRED_PERMISSIONS,
-                missingPermissions: metaStatus.missing_permissions,
-                error: metaStatus.error ?? null,
-              },
-            }),
-          );
+          sendJsonResponse(res, 200, {
+            ok: true,
+            service: SERVICE_NAME,
+            build: buildForResponse,
+            config: {
+              cwd: process.cwd(),
+              statePath: STATE_PATH,
+              stateDir: dirname(STATE_PATH),
+              rssUrl: ETSY_SHOP_RSS_URL || null,
+              rssUrlPresent: Boolean(ETSY_SHOP_RSS_URL),
+              facebookEnabled: fbStatus.enabled,
+              facebookReason: fbStatus.reason ?? null,
+              facebookMissingEnv: fbStatus.missingEnv ?? [],
+              instagramEnabled: INSTAGRAM_ENABLED,
+              maxPostsPerDay: MAX_POSTS_PER_DAY,
+              minPostIntervalHours: MIN_POST_INTERVAL_HOURS,
+              dedupeDays: DEDUPE_DAYS,
+              ignoreDedupe: IGNORE_DEDUPE,
+              checkIntervalMs: CHECK_INTERVAL_MS,
+              telegramPollingEnabled: TELEGRAM_POLLING_ENABLED,
+              rssInstagramImageOverride: RSS_INSTAGRAM_IMAGE_URL_OVERRIDE || null,
+              rssInstagramTestImage: RSS_INSTAGRAM_TEST_IMAGE_URL || null,
+              pinterestTestMode: PINTEREST_TEST_MODE,
+              apiTokenProtected: Boolean(ETSY_AUTO_POST_TOKEN),
+            },
+            meta: {
+              accessTokenPresent: Boolean(META_ACCESS_TOKEN),
+              pageAccessTokenPresent: Boolean(META_PAGE_ACCESS_TOKEN),
+              pageId: META_PAGE_ID || null,
+              pageAccessOk: metaStatus.page_access_ok,
+              pageIdFound: metaStatus.page_id_found,
+              igLinked: metaStatus.ig_linked,
+              requiredPermissions: META_REQUIRED_PERMISSIONS,
+              missingPermissions: metaStatus.missing_permissions,
+              error: metaStatus.error ?? null,
+            },
+          });
         })().catch((error) => {
-          if (!res.writableEnded) {
-            res.writeHead(500, { "content-type": "application/json; charset=utf-8" });
-            res.end(JSON.stringify({ ok: false, error: String(error) }));
-          }
+          sendJsonResponse(res, 500, { ok: false, error: String(error) });
         });
         return;
       }
@@ -3909,28 +3944,42 @@ async function main(): Promise<void> {
             if (res.writableEnded) {
               return;
             }
-            res.writeHead(report.ok ? 200 : 503, {
-              "content-type": "application/json; charset=utf-8",
-            });
-            res.end(JSON.stringify(report));
+            sendJsonResponse(res, report.ok ? 200 : 503, report);
           })
           .catch((error) => {
-            if (!res.writableEnded) {
-              res.writeHead(500, { "content-type": "application/json; charset=utf-8" });
-              res.end(JSON.stringify({ ok: false, error: `diagnostics_failed:${String(error)}` }));
-            }
+            sendJsonResponse(res, 500, { ok: false, error: `diagnostics_failed:${String(error)}` });
+          });
+        return;
+      }
+      if (url.pathname === "/manual-run") {
+        if (req.method !== "POST") {
+          sendJsonResponse(res, 405, { ok: false, error: "use POST /manual-run" });
+          return;
+        }
+        if (!requestHasApiAccess(req)) {
+          sendJsonResponse(res, 401, { ok: false, error: "unauthorized" });
+          return;
+        }
+        void scheduleCheck("manual")
+          .then(() => {
+            sendJsonResponse(res, 200, {
+              ok: true,
+              trigger: "manual",
+              run: lastRunSummary,
+            });
+          })
+          .catch((error) => {
+            sendJsonResponse(res, 500, { ok: false, error: `manual_run_failed:${String(error)}` });
           });
         return;
       }
       if (url.pathname === "/pinterest_test" && PINTEREST_TEST_MODE) {
         if (req.method !== "POST") {
-          res.writeHead(405, { "content-type": "application/json; charset=utf-8" });
-          res.end(JSON.stringify({ ok: false, error: "use POST /pinterest_test" }));
+          sendJsonResponse(res, 405, { ok: false, error: "use POST /pinterest_test" });
           return;
         }
         if (pinterestTestTriggered) {
-          res.writeHead(429, { "content-type": "application/json; charset=utf-8" });
-          res.end(JSON.stringify({ ok: false, error: "pinterest test already triggered" }));
+          sendJsonResponse(res, 429, { ok: false, error: "pinterest test already triggered" });
           return;
         }
         pinterestTestTriggered = true;
@@ -3939,17 +3988,11 @@ async function main(): Promise<void> {
             if (res.writableEnded) {
               return;
             }
-            res.writeHead(result.ok ? 200 : result.status || 500, {
-              "content-type": "application/json; charset=utf-8",
-            });
-            res.end(JSON.stringify(result));
+            sendJsonResponse(res, result.ok ? 200 : result.status || 500, result);
           })
           .catch((error) => {
             console.log(`[pinterest] smoke test handler error: ${String(error)}`);
-            if (!res.writableEnded) {
-              res.writeHead(500, { "content-type": "application/json; charset=utf-8" });
-              res.end(JSON.stringify({ ok: false, error: "pinterest test handler error" }));
-            }
+            sendJsonResponse(res, 500, { ok: false, error: "pinterest test handler error" });
           });
         return;
       }

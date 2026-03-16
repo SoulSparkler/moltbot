@@ -237,6 +237,15 @@
         "ban": { "label": "ban", "detailKeys": ["provider", "guildId", "userId"] }
       }
     },
+    "etsy_auto_post": {
+      "emoji": "🛍️",
+      "title": "Etsy Auto Post",
+      "actions": {
+        "status": { "label": "status" },
+        "diagnostics": { "label": "diagnostics" },
+        "run": { "label": "run" }
+      }
+    },
     "agents_list": {
       "emoji": "🧭",
       "title": "Agents",

@@ -7,6 +7,7 @@ import { createAgentsListTool } from "./tools/agents-list-tool.js";
 import { createBrowserTool } from "./tools/browser-tool.js";
 import { createCanvasTool } from "./tools/canvas-tool.js";
 import { createCronTool } from "./tools/cron-tool.js";
+import { createEtsyAutoPostTool } from "./tools/etsy-auto-post-tool.js";
 import { createGatewayTool } from "./tools/gateway-tool.js";
 import { createImageTool } from "./tools/image-tool.js";
 import { createMessageTool } from "./tools/message-tool.js";
@@ -92,6 +93,9 @@ export function createOpenClawTools(options?: {
   const metaSocialTool = createMetaSocialTool({
     config: options?.config,
   });
+  const etsyAutoPostTool = createEtsyAutoPostTool({
+    config: options?.config,
+  });
   const tools: AnyAgentTool[] = [
     createBrowserTool({
       sandboxBridgeUrl: options?.sandboxBrowserBridgeUrl,
@@ -107,6 +111,7 @@ export function createOpenClawTools(options?: {
     }),
     ...(messageTool ? [messageTool] : []),
     ...(metaSocialTool ? [metaSocialTool] : []),
+    ...(etsyAutoPostTool ? [etsyAutoPostTool] : []),
     createTtsTool({
       agentChannel: options?.agentChannel,
       config: options?.config,
