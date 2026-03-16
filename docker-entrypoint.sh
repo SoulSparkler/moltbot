@@ -106,9 +106,20 @@ fi
 
 bootstrap_workspace_files() {
     local workspace_dir="$OPENCLAW_WORKSPACE_DIR"
-    local script_dir template_dir
+    local script_dir template_dir=""
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    template_dir="$script_dir/docs/reference/templates"
+    local template_candidates=(
+        "/app/docs/reference/templates"
+        "$(pwd)/docs/reference/templates"
+        "$script_dir/docs/reference/templates"
+    )
+    local candidate
+    for candidate in "${template_candidates[@]}"; do
+        if [ -d "$candidate" ]; then
+            template_dir="$candidate"
+            break
+        fi
+    done
     local required_files=( "AGENTS.md" "IDENTITY.md" "SOUL.md" "TOOLS.md" )
     local legacy_dirs_raw="${OPENCLAW_WORKSPACE_LEGACY_DIRS:-/data/workspace,/data/.openclaw/workspace}"
     local legacy_dirs=()
@@ -244,6 +255,47 @@ fi
 if [ "$is_gateway_cmd" -eq 1 ]; then
     echo "[entrypoint] Running gateway with explicit bind=lan and token"
 
+    resolve_etsy_auto_post_port() {
+        local gateway_port="$1"
+        local raw="${ETSY_AUTO_POST_PORT:-${RSS_PORT:-}}"
+        if [[ "$raw" =~ ^[0-9]+$ ]] && [ "$raw" -gt 0 ]; then
+            printf '%s\n' "$raw"
+            return
+        fi
+        if [ "$gateway_port" = "8081" ]; then
+            printf '8082\n'
+            return
+        fi
+        printf '8081\n'
+    }
+
+    ensure_etsy_auto_post_token() {
+        local existing="${ETSY_AUTO_POST_TOKEN:-${RSS_API_TOKEN:-}}"
+        if [ -n "$existing" ]; then
+            ETSY_AUTO_POST_TOKEN_VALUE="$existing"
+            ETSY_AUTO_POST_TOKEN="$existing"
+            RSS_API_TOKEN="$existing"
+            export ETSY_AUTO_POST_TOKEN_VALUE ETSY_AUTO_POST_TOKEN RSS_API_TOKEN
+            return
+        fi
+
+        local generated
+        generated=$(head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 32)
+        ETSY_AUTO_POST_TOKEN_VALUE="$generated"
+        ETSY_AUTO_POST_TOKEN="$generated"
+        RSS_API_TOKEN="$generated"
+        export ETSY_AUTO_POST_TOKEN_VALUE ETSY_AUTO_POST_TOKEN RSS_API_TOKEN
+    }
+
+    ETSY_AUTO_POST_PORT="$(resolve_etsy_auto_post_port "$OPENCLAW_GATEWAY_PORT")"
+    export ETSY_AUTO_POST_PORT
+    ensure_etsy_auto_post_token
+    if [ -z "${ETSY_AUTO_POST_URL:-}" ]; then
+        ETSY_AUTO_POST_URL="http://127.0.0.1:${ETSY_AUTO_POST_PORT}"
+    fi
+    export ETSY_AUTO_POST_URL
+    echo "[entrypoint] Etsy auto-post bridge: url=$ETSY_AUTO_POST_URL port=$ETSY_AUTO_POST_PORT token=${ETSY_AUTO_POST_TOKEN_VALUE:0:8}..."
+
     # Force bind mode in config and set browser defaults
     echo "[entrypoint] Writing config with gateway.bind=lan and browser settings..."
     node - <<'NODE'
@@ -257,6 +309,270 @@ if (!configPath) {
 
 const gatewayToken = process.env.OPENCLAW_GATEWAY_TOKEN || '';
 const googleStatePath = process.env.GOOGLE_STORAGE_STATE_PATH || '';
+const JANNETJE_AGENT_ID = 'jannetje';
+const JANNETJE_NAME = 'Jannetje';
+const JANNETJE_EMOJI = '\u{1F9E1}';
+const JANNETJE_BOOTSTRAP_FILES = [
+  'AGENTS.md',
+  'SOUL.md',
+  'TOOLS.md',
+  'IDENTITY.md',
+  'USER.md',
+  'HEARTBEAT.md',
+  'MEMORY.md',
+  'memory.md',
+];
+const JANNETJE_TEMPLATE_FILES = {
+  'IDENTITY.md': 'IDENTITY.jannetje.md',
+  'SOUL.md': 'SOUL.jannetje.md',
+  'USER.md': 'USER.jannetje.md',
+};
+
+function resolveHomeRelativePath(rawPath) {
+  if (typeof rawPath !== 'string') {
+    return '';
+  }
+  const trimmed = rawPath.trim();
+  if (!trimmed) {
+    return '';
+  }
+  if (trimmed === '~') {
+    return process.env.HOME?.trim() || trimmed;
+  }
+  if (trimmed.startsWith('~/')) {
+    const home = process.env.HOME?.trim();
+    if (!home) {
+      return trimmed;
+    }
+    return path.join(home, trimmed.slice(2));
+  }
+  return trimmed;
+}
+
+function fileExists(filePath) {
+  try {
+    return fs.statSync(filePath).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function dirExists(dirPath) {
+  try {
+    return fs.statSync(dirPath).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function stripFrontMatter(content) {
+  if (typeof content !== 'string' || !content.startsWith('---')) {
+    return typeof content === 'string' ? content : '';
+  }
+  const endIndex = content.indexOf('\n---', 3);
+  if (endIndex === -1) {
+    return content;
+  }
+  return content.slice(endIndex + '\n---'.length).replace(/^\s+/, '');
+}
+
+function normalizeTemplateText(content) {
+  return stripFrontMatter(content).replace(/\r\n/g, '\n').trim();
+}
+
+function normalizeMarkdownLabel(label) {
+  return String(label || '')
+    .replace(/[*_]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function readMarkdownFieldValue(content, labels) {
+  const allowed = new Set((labels || []).map((label) => normalizeMarkdownLabel(label)));
+  if (allowed.size === 0) {
+    return '';
+  }
+  for (const rawLine of stripFrontMatter(content).split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line.startsWith('-')) {
+      continue;
+    }
+    const match = /^-\s*(.+?):\s*(.*)$/.exec(line);
+    if (!match) {
+      continue;
+    }
+    const label = normalizeMarkdownLabel(match[1]);
+    if (!allowed.has(label)) {
+      continue;
+    }
+    const value = String(match[2] || '')
+      .replace(/^[*_]+|[*_]+$/g, '')
+      .trim();
+    if (value) {
+      return value;
+    }
+  }
+  return '';
+}
+
+function resolveWorkspaceTemplateDir() {
+  const candidates = [
+    process.env.OPENCLAW_TEMPLATE_DIR?.trim(),
+    '/app/docs/reference/templates',
+    path.join(process.cwd(), 'docs', 'reference', 'templates'),
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    if (dirExists(candidate)) {
+      return candidate;
+    }
+  }
+  return '';
+}
+
+const workspaceTemplateDir = resolveWorkspaceTemplateDir();
+
+function loadWorkspaceTemplate(templateName) {
+  if (!workspaceTemplateDir) {
+    return '';
+  }
+  const templatePath = path.join(workspaceTemplateDir, templateName);
+  if (!fileExists(templatePath)) {
+    return '';
+  }
+  return normalizeTemplateText(fs.readFileSync(templatePath, 'utf8'));
+}
+
+function isPlaceholderIdentityContent(content) {
+  if (typeof content !== 'string') {
+    return true;
+  }
+  return content.includes('_(pick something you like)_') || content.trim().length < 50;
+}
+
+function isDefaultWorkspaceTemplate(fileName, content) {
+  if (!fileName || typeof content !== 'string') {
+    return false;
+  }
+  const template = loadWorkspaceTemplate(fileName);
+  return Boolean(template) && normalizeTemplateText(content) === template;
+}
+
+function identityNeedsBootstrap(content) {
+  const normalized = normalizeTemplateText(content);
+  if (!normalized) {
+    return true;
+  }
+  if (isPlaceholderIdentityContent(normalized)) {
+    return true;
+  }
+  return !(
+    readMarkdownFieldValue(normalized, ['Name']) &&
+    readMarkdownFieldValue(normalized, ['Creature']) &&
+    readMarkdownFieldValue(normalized, ['Emoji'])
+  );
+}
+
+function userNeedsBootstrap(content) {
+  const normalized = normalizeTemplateText(content);
+  if (!normalized) {
+    return true;
+  }
+  return !(
+    readMarkdownFieldValue(normalized, ['Name']) &&
+    readMarkdownFieldValue(normalized, ['What to call them', 'Preferred address'])
+  );
+}
+
+function shouldBootstrapJannetjeFile(fileName, content) {
+  if (typeof content !== 'string' || !content.trim()) {
+    return true;
+  }
+  if (isDefaultWorkspaceTemplate(fileName, content)) {
+    return true;
+  }
+  if (fileName === 'IDENTITY.md') {
+    return identityNeedsBootstrap(content);
+  }
+  if (fileName === 'USER.md') {
+    return userNeedsBootstrap(content);
+  }
+  return false;
+}
+
+function writeWorkspaceFile(targetPath, content) {
+  fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+  fs.writeFileSync(targetPath, `${content}\n`);
+}
+
+function copyMissingWorkspaceBootstrapFiles(targetDir, sourceDirs) {
+  for (const fileName of JANNETJE_BOOTSTRAP_FILES) {
+    const targetPath = path.join(targetDir, fileName);
+    const targetExists = fileExists(targetPath);
+    const treatAsMissing =
+      fileName === 'IDENTITY.md' &&
+      targetExists &&
+      isPlaceholderIdentityContent(fs.readFileSync(targetPath, 'utf8'));
+    if (targetExists && !treatAsMissing) {
+      continue;
+    }
+
+    const sourcePath = sourceDirs
+      .map((dir) => path.join(dir, fileName))
+      .find((candidate) => fileExists(candidate));
+    if (sourcePath) {
+      fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+      fs.copyFileSync(sourcePath, targetPath);
+      continue;
+    }
+
+    const template = loadWorkspaceTemplate(fileName);
+    if (template) {
+      writeWorkspaceFile(targetPath, template);
+    }
+  }
+
+  const targetSkillsDir = path.join(targetDir, 'skills');
+  if (dirExists(targetSkillsDir)) {
+    return;
+  }
+  const sourceSkillsDir = sourceDirs
+    .map((dir) => path.join(dir, 'skills'))
+    .find((candidate) => dirExists(candidate));
+  if (sourceSkillsDir) {
+    fs.mkdirSync(path.dirname(targetSkillsDir), { recursive: true });
+    fs.cpSync(sourceSkillsDir, targetSkillsDir, { recursive: true });
+    return;
+  }
+  fs.mkdirSync(targetSkillsDir, { recursive: true });
+}
+
+function ensureJannetjePersonaFiles(workspaceDir) {
+  for (const [targetName, templateName] of Object.entries(JANNETJE_TEMPLATE_FILES)) {
+    const targetPath = path.join(workspaceDir, targetName);
+    const existing = fileExists(targetPath) ? fs.readFileSync(targetPath, 'utf8') : '';
+    if (!shouldBootstrapJannetjeFile(targetName, existing)) {
+      continue;
+    }
+    const template = loadWorkspaceTemplate(templateName);
+    if (!template) {
+      continue;
+    }
+    writeWorkspaceFile(targetPath, template);
+  }
+}
+
+function removeJannetjeBootstrapFile(workspaceDir) {
+  const bootstrapPath = path.join(workspaceDir, 'BOOTSTRAP.md');
+  if (!fileExists(bootstrapPath)) {
+    return;
+  }
+  try {
+    fs.rmSync(bootstrapPath);
+  } catch {
+    // Ignore stale bootstrap cleanup failures.
+  }
+}
 
 let cfg = {};
 try {
@@ -334,7 +650,11 @@ if (cfg.browser && cfg.browser.profiles) {
 // Railway should always boot with Anthropic Sonnet 4.5 as the default model.
 cfg.agents = cfg.agents || {};
 cfg.agents.defaults = cfg.agents.defaults || {};
-cfg.agents.defaults.workspace = (process.env.OPENCLAW_WORKSPACE_DIR || "").trim();
+const resolvedWorkspace =
+  resolveHomeRelativePath(process.env.OPENCLAW_WORKSPACE_DIR || '') ||
+  resolveHomeRelativePath(cfg.agents.defaults.workspace || '') ||
+  '/data/workspace';
+cfg.agents.defaults.workspace = resolvedWorkspace;
 
 const primaryModel = 'anthropic/claude-sonnet-4-5';
 const fallbackModels = [];
@@ -405,6 +725,62 @@ cfg.agents.defaults.thinkingDefault = cfg.agents.defaults.thinkingDefault || 'of
 cfg.tools = cfg.tools || {};
 cfg.tools.metaSocial = cfg.tools.metaSocial || {};
 cfg.tools.metaSocial.enabled = true;
+cfg.tools.etsyAutoPost = cfg.tools.etsyAutoPost || {};
+cfg.tools.etsyAutoPost.enabled = true;
+const etsyBaseUrl = (process.env.ETSY_AUTO_POST_URL || '').trim();
+if (etsyBaseUrl) {
+  cfg.tools.etsyAutoPost.baseUrl = etsyBaseUrl;
+}
+const etsyToken =
+  (process.env.ETSY_AUTO_POST_TOKEN || process.env.RSS_API_TOKEN || '').trim();
+if (etsyToken) {
+  cfg.tools.etsyAutoPost.token = etsyToken;
+}
+
+if (!Array.isArray(cfg.agents.list)) {
+  cfg.agents.list = [];
+}
+let jannetje = cfg.agents.list.find(
+  (agent) => agent && typeof agent === 'object' && String(agent.id || '').trim().toLowerCase() === JANNETJE_AGENT_ID,
+);
+if (!jannetje) {
+  jannetje = { id: JANNETJE_AGENT_ID };
+  cfg.agents.list.push(jannetje);
+}
+jannetje.id = JANNETJE_AGENT_ID;
+jannetje.default = true;
+jannetje.name = JANNETJE_NAME;
+jannetje.workspace = resolvedWorkspace;
+jannetje.identity =
+  jannetje.identity && typeof jannetje.identity === 'object' ? jannetje.identity : {};
+jannetje.identity.name = JANNETJE_NAME;
+jannetje.identity.emoji = JANNETJE_EMOJI;
+if (!jannetje.model || typeof jannetje.model !== 'object') {
+  jannetje.model = {};
+}
+jannetje.model.primary = primaryModel;
+jannetje.model.fallbacks = removeLegacyRailwayFallbacks(jannetje.model.fallbacks);
+for (const agent of cfg.agents.list) {
+  if (agent && typeof agent === 'object' && agent !== jannetje) {
+    delete agent.default;
+  }
+}
+
+cfg.messages = cfg.messages && typeof cfg.messages === 'object' ? cfg.messages : {};
+if (cfg.messages.responsePrefix === undefined) {
+  cfg.messages.responsePrefix = 'auto';
+}
+
+cfg.ui = cfg.ui && typeof cfg.ui === 'object' ? cfg.ui : {};
+cfg.ui.assistant = cfg.ui.assistant && typeof cfg.ui.assistant === 'object' ? cfg.ui.assistant : {};
+const assistantName =
+  typeof cfg.ui.assistant.name === 'string' ? cfg.ui.assistant.name.trim().toLowerCase() : '';
+if (!assistantName || assistantName === 'assistant') {
+  cfg.ui.assistant.name = JANNETJE_NAME;
+}
+if (!cfg.ui.assistant.avatar || !String(cfg.ui.assistant.avatar).trim()) {
+  cfg.ui.assistant.avatar = JANNETJE_EMOJI;
+}
 
 // Enable brain -> muscle -> brain reply pipeline.
 // Remove stale model references from the pipeline while keeping non-legacy brain overrides.
@@ -475,11 +851,30 @@ console.log(
   `[entrypoint] API keys: OPENROUTER_API_KEY=${openRouterKeyState} ANTHROPIC_API_KEY=${anthropicKeyState}`,
 );
 
+const sourceDirs = [
+  resolveHomeRelativePath(process.env.OPENCLAW_WORKSPACE_DIR || ''),
+  resolveHomeRelativePath(cfg.agents.defaults.workspace || ''),
+  resolveHomeRelativePath(jannetje.workspace || ''),
+  '/data/workspace',
+  '/data/.openclaw/workspace',
+]
+  .filter(Boolean)
+  .filter((candidate, index, all) => all.indexOf(candidate) === index)
+  .filter((candidate) => candidate !== resolvedWorkspace && dirExists(candidate));
+
+fs.mkdirSync(resolvedWorkspace, { recursive: true });
+copyMissingWorkspaceBootstrapFiles(resolvedWorkspace, sourceDirs);
+ensureJannetjePersonaFiles(resolvedWorkspace);
+removeJannetjeBootstrapFile(resolvedWorkspace);
+
 fs.mkdirSync(path.dirname(configPath), { recursive: true });
 fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2));
 console.log('[entrypoint] Config written');
 console.log(
-  `[entrypoint] Workspace config: resolved=${process.env.OPENCLAW_WORKSPACE_DIR || "<unset>"} persisted=${cfg.agents.defaults.workspace || "<unset>"}`,
+  `[entrypoint] Workspace config: resolved=${resolvedWorkspace} persisted=${cfg.agents.defaults.workspace || "<unset>"}`,
+);
+console.log(
+  `[entrypoint] Jannetje identity: name=${jannetje.identity.name} emoji=${jannetje.identity.emoji} workspace=${resolvedWorkspace}`,
 );
 if (cfg.browser && cfg.browser.profiles) {
   console.log('[entrypoint] Browser profiles:', Object.keys(cfg.browser.profiles).join(', '));
@@ -522,10 +917,10 @@ NODE
 
     # Start etsy-auto-post sidecar if the built artifact exists
     # RSS_TELEGRAM_POLLING=false - only the gateway may poll Telegram to avoid 409 conflicts
-    ETSY_ENTRY="/app/apps/etsy-auto-post/dist/index.js"
+    ETSY_ENTRY="${OPENCLAW_ETSY_ENTRY:-/app/apps/etsy-auto-post/dist/index.js}"
     if [ -f "$ETSY_ENTRY" ]; then
-        echo "[entrypoint] Starting etsy-auto-post sidecar (health server disabled, telegram polling disabled, gateway owns PORT)"
-        RSS_DISABLE_HEALTH_SERVER=1 RSS_TELEGRAM_POLLING=false node "$ETSY_ENTRY" &
+        echo "[entrypoint] Starting etsy-auto-post sidecar on $ETSY_AUTO_POST_URL (telegram polling disabled)"
+        PORT="$ETSY_AUTO_POST_PORT" RSS_DISABLE_HEALTH_SERVER=0 RSS_TELEGRAM_POLLING=false ETSY_AUTO_POST_TOKEN="$ETSY_AUTO_POST_TOKEN" RSS_API_TOKEN="$RSS_API_TOKEN" node "$ETSY_ENTRY" &
     fi
 
     if [ "$(id -u)" -eq 0 ] && command -v su >/dev/null 2>&1; then
