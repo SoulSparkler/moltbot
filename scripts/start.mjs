@@ -6,6 +6,7 @@ import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
 function spawnWithResult(command, args, env = process.env) {
   const child = spawn(command, args, {
@@ -49,6 +50,7 @@ function sleep(ms) {
 
 const LEGACY_CONFIG_FILES = ["openclaw.json", "clawdbot.json", "moltbot.json"];
 const RAILWAY_PRIMARY_MODEL = "anthropic/claude-sonnet-4-5";
+const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const JANNETJE_AGENT_ID = "jannetje";
 const JANNETJE_NAME = "Jannetje";
 const JANNETJE_EMOJI = "\uD83E\uDDE1";
@@ -59,10 +61,14 @@ const JANNETJE_BOOTSTRAP_FILES = [
   "IDENTITY.md",
   "USER.md",
   "HEARTBEAT.md",
-  "BOOTSTRAP.md",
   "MEMORY.md",
   "memory.md",
 ];
+const JANNETJE_TEMPLATE_FILES = {
+  "IDENTITY.md": "IDENTITY.jannetje.md",
+  "SOUL.md": "SOUL.jannetje.md",
+  "USER.md": "USER.jannetje.md",
+};
 const DEFAULT_ETSY_AUTO_POST_PORT = 8081;
 
 function resolveHomeRelativePath(rawPath) {
@@ -115,6 +121,62 @@ function readConfigObject(configPath) {
   }
 }
 
+function stripFrontMatter(content) {
+  if (typeof content !== "string" || !content.startsWith("---")) {
+    return typeof content === "string" ? content : "";
+  }
+  const endIndex = content.indexOf("\n---", 3);
+  if (endIndex === -1) {
+    return content;
+  }
+  return content.slice(endIndex + "\n---".length).replace(/^\s+/, "");
+}
+
+function normalizeTemplateText(content) {
+  return stripFrontMatter(content).replace(/\r\n/g, "\n").trim();
+}
+
+function normalizeMarkdownLabel(label) {
+  return String(label || "")
+    .replace(/[*_]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function readMarkdownFieldValue(content, labels) {
+  const allowed = new Set((labels || []).map((label) => normalizeMarkdownLabel(label)));
+  if (allowed.size === 0) {
+    return "";
+  }
+  for (const rawLine of stripFrontMatter(content).split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line.startsWith("-")) {
+      continue;
+    }
+    const match = /^-\s*(.+?):\s*(.*)$/.exec(line);
+    if (!match) {
+      continue;
+    }
+    const label = normalizeMarkdownLabel(match[1]);
+    if (!allowed.has(label)) {
+      continue;
+    }
+    const value = String(match[2] || "")
+      .replace(/^[*_]+|[*_]+$/g, "")
+      .trim();
+    if (value) {
+      return value;
+    }
+  }
+  return "";
+}
+
+function loadWorkspaceTemplate(templateName) {
+  const templatePath = path.join(SCRIPT_DIR, "../docs/reference/templates", templateName);
+  return normalizeTemplateText(fs.readFileSync(templatePath, "utf8"));
+}
+
 function listAgentEntries(configObject) {
   const list = configObject?.agents?.list;
   if (!Array.isArray(list)) {
@@ -149,6 +211,86 @@ function isPlaceholderIdentityContent(content) {
     return true;
   }
   return content.includes("_(pick something you like)_") || content.trim().length < 50;
+}
+
+function isDefaultWorkspaceTemplate(fileName, content) {
+  if (!fileName || typeof content !== "string") {
+    return false;
+  }
+  try {
+    return normalizeTemplateText(content) === loadWorkspaceTemplate(fileName);
+  } catch {
+    return false;
+  }
+}
+
+function identityNeedsBootstrap(content) {
+  const normalized = normalizeTemplateText(content);
+  if (!normalized) {
+    return true;
+  }
+  if (isPlaceholderIdentityContent(normalized)) {
+    return true;
+  }
+  return !(
+    readMarkdownFieldValue(normalized, ["Name"]) &&
+    readMarkdownFieldValue(normalized, ["Creature"]) &&
+    readMarkdownFieldValue(normalized, ["Emoji"])
+  );
+}
+
+function userNeedsBootstrap(content) {
+  const normalized = normalizeTemplateText(content);
+  if (!normalized) {
+    return true;
+  }
+  return !(
+    readMarkdownFieldValue(normalized, ["Name"]) &&
+    readMarkdownFieldValue(normalized, ["What to call them", "Preferred address"])
+  );
+}
+
+function shouldBootstrapJannetjeFile(fileName, content) {
+  if (typeof content !== "string" || !content.trim()) {
+    return true;
+  }
+  if (isDefaultWorkspaceTemplate(fileName, content)) {
+    return true;
+  }
+  if (fileName === "IDENTITY.md") {
+    return identityNeedsBootstrap(content);
+  }
+  if (fileName === "USER.md") {
+    return userNeedsBootstrap(content);
+  }
+  return false;
+}
+
+function ensureJannetjePersonaFiles(workspaceDir) {
+  for (const [targetName, templateName] of Object.entries(JANNETJE_TEMPLATE_FILES)) {
+    const targetPath = path.join(workspaceDir, targetName);
+    const existing = fileExists(targetPath) ? fs.readFileSync(targetPath, "utf8") : "";
+    if (!shouldBootstrapJannetjeFile(targetName, existing)) {
+      continue;
+    }
+    const template = loadWorkspaceTemplate(templateName);
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    fs.writeFileSync(targetPath, `${template}\n`);
+    console.log(`[openclaw start] Bootstrapped ${targetPath} from ${templateName}`);
+  }
+}
+
+function removeJannetjeBootstrapFile(workspaceDir) {
+  const bootstrapPath = path.join(workspaceDir, "BOOTSTRAP.md");
+  if (!fileExists(bootstrapPath)) {
+    return;
+  }
+  try {
+    fs.rmSync(bootstrapPath);
+    console.log(`[openclaw start] Removed stale ${bootstrapPath}`);
+  } catch (err) {
+    console.warn(`[openclaw start] Could not remove ${bootstrapPath}:`, err.message);
+  }
 }
 
 function copyMissingWorkspaceBootstrapFiles(targetDir, sourceDirs) {
@@ -598,35 +740,8 @@ function bootstrapJannetjeWorkspace() {
 
   fs.mkdirSync(workspaceDir, { recursive: true });
   copyMissingWorkspaceBootstrapFiles(workspaceDir, sourceDirs);
-
-  const identityPath = path.join(workspaceDir, "IDENTITY.md");
-  // Only write if the file doesn't exist or still contains the blank template placeholder.
-  let shouldWrite = !fs.existsSync(identityPath);
-  if (!shouldWrite) {
-    try {
-      const existing = fs.readFileSync(identityPath, "utf8");
-      if (isPlaceholderIdentityContent(existing)) {
-        shouldWrite = true;
-      }
-    } catch {
-      shouldWrite = true;
-    }
-  }
-  if (!shouldWrite) {
-    return;
-  }
-  const templatePath = path.join(
-    path.dirname(new URL(import.meta.url).pathname),
-    "../docs/reference/templates/IDENTITY.jannetje.md",
-  );
-  try {
-    const template = fs.readFileSync(templatePath, "utf8");
-    fs.mkdirSync(workspaceDir, { recursive: true });
-    fs.writeFileSync(identityPath, template);
-    console.log(`[openclaw start] Bootstrapped ${workspaceDir}/IDENTITY.md`);
-  } catch (err) {
-    console.warn("[openclaw start] Could not bootstrap IDENTITY.md:", err.message);
-  }
+  ensureJannetjePersonaFiles(workspaceDir);
+  removeJannetjeBootstrapFile(workspaceDir);
 }
 
 async function ensureEtsyBuild() {

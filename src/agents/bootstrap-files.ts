@@ -1,6 +1,8 @@
 import type { OpenClawConfig } from "../config/config.js";
 import type { EmbeddedContextFile } from "./pi-embedded-helpers.js";
+import { resolveAgentIdFromSessionKey } from "../routing/session-key.js";
 import { applyBootstrapHookOverrides } from "./bootstrap-hooks.js";
+import { applyBuiltInBootstrapFileOverrides } from "./bootstrap-overrides.js";
 import { buildBootstrapContextFiles, resolveBootstrapMaxChars } from "./pi-embedded-helpers.js";
 import {
   filterBootstrapFilesForSession,
@@ -26,12 +28,19 @@ export async function resolveBootstrapFilesForRun(params: {
   agentId?: string;
 }): Promise<WorkspaceBootstrapFile[]> {
   const sessionKey = params.sessionKey ?? params.sessionId;
+  const agentId =
+    params.agentId ??
+    (params.sessionKey ? resolveAgentIdFromSessionKey(params.sessionKey) : undefined);
   const bootstrapFiles = filterBootstrapFilesForSession(
     await loadWorkspaceBootstrapFiles(params.workspaceDir),
     sessionKey,
   );
-  return applyBootstrapHookOverrides({
+  const builtInAdjusted = await applyBuiltInBootstrapFileOverrides({
     files: bootstrapFiles,
+    agentId,
+  });
+  return applyBootstrapHookOverrides({
+    files: builtInAdjusted,
     workspaceDir: params.workspaceDir,
     config: params.config,
     sessionKey: params.sessionKey,
