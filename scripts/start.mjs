@@ -345,6 +345,12 @@ function normalizeRailwayGatewayModels() {
     }
   }
 
+  // Enable meta_social tool so Jannetje can post to Facebook/Instagram.
+  cfg.tools = cfg.tools && typeof cfg.tools === "object" ? cfg.tools : {};
+  cfg.tools.metaSocial =
+    cfg.tools.metaSocial && typeof cfg.tools.metaSocial === "object" ? cfg.tools.metaSocial : {};
+  cfg.tools.metaSocial.enabled = true;
+
   fs.mkdirSync(path.dirname(configPath), { recursive: true });
   fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2));
   console.log(
