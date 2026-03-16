@@ -84,18 +84,19 @@ export async function runCliAgent(params: {
   ]
     .filter(Boolean)
     .join("\n");
+  const { defaultAgentId, sessionAgentId } = resolveSessionAgentIds({
+    sessionKey: params.sessionKey,
+    config: params.config,
+  });
 
   const sessionLabel = params.sessionKey ?? params.sessionId;
   const { contextFiles } = await resolveBootstrapContextForRun({
     workspaceDir,
     config: params.config,
+    agentId: params.agentId ?? sessionAgentId,
     sessionKey: params.sessionKey,
     sessionId: params.sessionId,
     warn: makeBootstrapWarn({ sessionLabel, warn: (message) => log.warn(message) }),
-  });
-  const { defaultAgentId, sessionAgentId } = resolveSessionAgentIds({
-    sessionKey: params.sessionKey,
-    config: params.config,
   });
   const heartbeatPrompt =
     sessionAgentId === defaultAgentId

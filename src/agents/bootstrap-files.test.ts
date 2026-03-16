@@ -134,4 +134,24 @@ describe("resolveBootstrapContextForRun", () => {
       "- **What to call them:** Lou",
     );
   });
+
+  it("derives Jannetje overrides from the session key when agentId is omitted", async () => {
+    const workspaceDir = await makeTempWorkspace("openclaw-jannetje-session-key-");
+    const templateDir = await resolveWorkspaceTemplateDir();
+
+    await fs.writeFile(
+      path.join(workspaceDir, "IDENTITY.md"),
+      await fs.readFile(path.join(templateDir, "IDENTITY.md"), "utf-8"),
+      "utf-8",
+    );
+
+    const result = await resolveBootstrapContextForRun({
+      workspaceDir,
+      sessionKey: "agent:jannetje:main",
+    });
+
+    expect(result.contextFiles.find((file) => file.path === "IDENTITY.md")?.content).toContain(
+      "- **Name:** Jannetje",
+    );
+  });
 });
