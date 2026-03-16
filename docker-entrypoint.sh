@@ -401,6 +401,11 @@ if (Array.isArray(cfg.agents.list)) {
 // Reduce accidental spend: default thinking to off unless user enables it per-session.
 cfg.agents.defaults.thinkingDefault = cfg.agents.defaults.thinkingDefault || 'off';
 
+// Enable meta_social tool (META_* env vars are set in Railway environment).
+cfg.tools = cfg.tools || {};
+cfg.tools.metaSocial = cfg.tools.metaSocial || {};
+cfg.tools.metaSocial.enabled = true;
+
 // Enable brain -> muscle -> brain reply pipeline.
 // Remove stale model references from the pipeline while keeping non-legacy brain overrides.
 cfg.agents.defaults.replyPipeline = cfg.agents.defaults.replyPipeline || {};
