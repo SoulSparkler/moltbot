@@ -351,7 +351,7 @@ function normalizeRailwayGatewayModels() {
     cfg.tools.metaSocial && typeof cfg.tools.metaSocial === "object" ? cfg.tools.metaSocial : {};
   cfg.tools.metaSocial.enabled = true;
 
-  // Ensure Jannetje agent entry is always present with the correct identity and emoji.
+  // Ensure Jannetje agent entry is always present with the correct identity, emoji and model.
   if (!Array.isArray(cfg.agents.list)) {
     cfg.agents.list = [];
   }
@@ -366,6 +366,18 @@ function normalizeRailwayGatewayModels() {
   if (!jannetje.workspace) {
     jannetje.workspace = process.env.OPENCLAW_WORKSPACE_DIR || "/data/workspace";
   }
+  // Always ensure Jannetje runs on the primary model (not Opus or legacy refs).
+  if (!jannetje.model || typeof jannetje.model !== "object") {
+    jannetje.model = {};
+  }
+  if (
+    !jannetje.model.primary ||
+    isLegacyRailwayModelRef(jannetje.model.primary) ||
+    jannetje.model.primary.includes("opus")
+  ) {
+    jannetje.model.primary = RAILWAY_PRIMARY_MODEL;
+  }
+  jannetje.model.fallbacks = removeLegacyRailwayFallbacks(jannetje.model.fallbacks);
   // Remove default flag from other agents.
   for (const agent of cfg.agents.list) {
     if (agent && typeof agent === "object" && agent.id !== "jannetje") {
@@ -379,6 +391,41 @@ function normalizeRailwayGatewayModels() {
     `[openclaw start] Railway model defaults: primary=${RAILWAY_PRIMARY_MODEL} fallbacks=none`,
   );
   console.log("[openclaw start] Jannetje identity: name=Jannetje emoji=🧡");
+}
+
+function bootstrapJannetjeWorkspace() {
+  if (!isRailwayRuntime()) {
+    return;
+  }
+  const workspaceDir = process.env.OPENCLAW_WORKSPACE_DIR || "/data/workspace";
+  const identityPath = path.join(workspaceDir, "IDENTITY.md");
+  // Only write if the file doesn't exist or still contains the blank template placeholder.
+  let shouldWrite = !fs.existsSync(identityPath);
+  if (!shouldWrite) {
+    try {
+      const existing = fs.readFileSync(identityPath, "utf8");
+      if (existing.includes("_(pick something you like)_") || existing.trim().length < 50) {
+        shouldWrite = true;
+      }
+    } catch {
+      shouldWrite = true;
+    }
+  }
+  if (!shouldWrite) {
+    return;
+  }
+  const templatePath = path.join(
+    path.dirname(new URL(import.meta.url).pathname),
+    "../docs/reference/templates/IDENTITY.jannetje.md",
+  );
+  try {
+    const template = fs.readFileSync(templatePath, "utf8");
+    fs.mkdirSync(workspaceDir, { recursive: true });
+    fs.writeFileSync(identityPath, template);
+    console.log("[openclaw start] Bootstrapped Jannetje IDENTITY.md");
+  } catch (err) {
+    console.warn("[openclaw start] Could not bootstrap IDENTITY.md:", err.message);
+  }
 }
 
 async function ensureEtsyBuild() {
@@ -472,6 +519,7 @@ async function runEtsyForeground() {
 
 async function main() {
   configurePersistentPaths();
+  bootstrapJannetjeWorkspace();
 
   const explicitMode = process.env.OPENCLAW_START_MODE?.trim().toLowerCase();
   const railwayServiceName = process.env.RAILWAY_SERVICE_NAME?.trim().toLowerCase() ?? "";
