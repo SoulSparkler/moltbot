@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { canonicalizeEtsyUrl } from "./lib/meta-facebook.js";
 import type { PostingHistorySnapshot } from "./db.js";
 import {
@@ -14,6 +14,7 @@ import {
   buildFacebookCaption,
   buildInstagramCaption,
   buildPinterestCaption,
+  resolvePinterestStatus,
   toEnglishFetchUrl,
   stripEtsyShopSuffix,
 } from "./index.js";
@@ -451,6 +452,101 @@ describe("buildPinterestCaption", () => {
     const result = buildPinterestCaption(baseInfo, shareUrl);
     expect(result.title).not.toContain("/nl/");
     expect(result.description).not.toContain("/nl/");
+  });
+});
+
+describe("resolvePinterestStatus", () => {
+  const pinterestEnvKeys = [
+    "PINTEREST_ENABLED",
+    "PINTEREST_ACCESS_TOKEN",
+    "PINTEREST_BOARD_ID",
+    "PINTEREST_TEST_MODE",
+  ] as const;
+  const originalPinterestEnv = Object.fromEntries(
+    pinterestEnvKeys.map((key) => [key, process.env[key]]),
+  ) as Record<(typeof pinterestEnvKeys)[number], string | undefined>;
+
+  function restorePinterestEnv(): void {
+    for (const key of pinterestEnvKeys) {
+      const value = originalPinterestEnv[key];
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+
+  afterEach(() => {
+    restorePinterestEnv();
+  });
+
+  it("auto-enables Pinterest when credentials are present and the toggle is unset", () => {
+    delete process.env.PINTEREST_ENABLED;
+    process.env.PINTEREST_ACCESS_TOKEN = "pin-token";
+    process.env.PINTEREST_BOARD_ID = "board-123";
+    process.env.PINTEREST_TEST_MODE = "true";
+
+    expect(resolvePinterestStatus()).toEqual({
+      enabled: true,
+      reason: "enabled",
+      missingEnv: [],
+      accessTokenPresent: true,
+      boardIdPresent: true,
+      boardId: "board-123",
+      toggleRaw: null,
+      testMode: true,
+    });
+  });
+
+  it("keeps Pinterest disabled when the toggle is explicitly false", () => {
+    process.env.PINTEREST_ENABLED = "false";
+    process.env.PINTEREST_ACCESS_TOKEN = "pin-token";
+    process.env.PINTEREST_BOARD_ID = "board-123";
+    delete process.env.PINTEREST_TEST_MODE;
+
+    expect(resolvePinterestStatus()).toEqual({
+      enabled: false,
+      reason: "pinterest_enabled_false",
+      missingEnv: ["PINTEREST_ENABLED"],
+      accessTokenPresent: true,
+      boardIdPresent: true,
+      boardId: "board-123",
+      toggleRaw: "false",
+      testMode: false,
+    });
+  });
+
+  it("re-evaluates after env vars appear later in the same process", () => {
+    delete process.env.PINTEREST_ENABLED;
+    delete process.env.PINTEREST_ACCESS_TOKEN;
+    delete process.env.PINTEREST_BOARD_ID;
+    delete process.env.PINTEREST_TEST_MODE;
+
+    expect(resolvePinterestStatus()).toEqual({
+      enabled: false,
+      reason: "pinterest_access_token_missing",
+      missingEnv: ["PINTEREST_ACCESS_TOKEN", "PINTEREST_BOARD_ID"],
+      accessTokenPresent: false,
+      boardIdPresent: false,
+      boardId: null,
+      toggleRaw: null,
+      testMode: false,
+    });
+
+    process.env.PINTEREST_ACCESS_TOKEN = "pin-token";
+    process.env.PINTEREST_BOARD_ID = "board-456";
+
+    expect(resolvePinterestStatus()).toEqual({
+      enabled: true,
+      reason: "enabled",
+      missingEnv: [],
+      accessTokenPresent: true,
+      boardIdPresent: true,
+      boardId: "board-456",
+      toggleRaw: null,
+      testMode: false,
+    });
   });
 });
 

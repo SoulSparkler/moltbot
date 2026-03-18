@@ -86,11 +86,6 @@ const RSS_INSTAGRAM_POLL_TIMEOUT_MS = toNumberOrUndefined(
 );
 const RSS_INSTAGRAM_TEST_IMAGE_URL = process.env.RSS_INSTAGRAM_TEST_IMAGE_URL?.trim() ?? "";
 const PUBLIC_BASE_URL = resolvePublicBaseUrl();
-const PINTEREST_ACCESS_TOKEN = process.env.PINTEREST_ACCESS_TOKEN?.trim() ?? "";
-const PINTEREST_BOARD_ID = process.env.PINTEREST_BOARD_ID?.trim() ?? "";
-const PINTEREST_ENABLED_TOGGLE = resolveBooleanToggle("PINTEREST_ENABLED");
-const PINTEREST_ENABLED = PINTEREST_ENABLED_TOGGLE.enabled;
-const PINTEREST_TEST_MODE = process.env.PINTEREST_TEST_MODE === "true";
 const PINTEREST_TEST_IMAGE_URL = "https://via.placeholder.com/1000x1500.png";
 const PINTEREST_TEST_LINK = "https://www.etsy.com/listing/0";
 const PINTEREST_TEST_TITLE = "TEST PIN - Jannetje";
@@ -183,7 +178,8 @@ type FacebookEnablement = {
 
 let facebookEnablementMemo: FacebookEnablement | null = null;
 let instagramEnabledMemo: boolean | null = null;
-let pinterestEnabledMemo: boolean | null = null;
+let pinterestStatusMemo: PinterestStatus | null = null;
+let pinterestStatusMemoKey: string | null = null;
 let metaPermissionsMemo: {
   ok: boolean;
   status: number;
@@ -428,8 +424,9 @@ function logBuildProof(info: BuildInfo): void {
 }
 
 function logSelfCheck(info: BuildInfo): void {
+  const pinterestStatus = resolvePinterestStatus();
   console.log(
-    `[self-check] service=${SERVICE_NAME} cwd=${info.cwd} state_path=${STATE_PATH} rss_url=${ETSY_SHOP_RSS_URL || "missing"} facebook=${FACEBOOK_ENABLED ? "on" : "off"} instagram=${INSTAGRAM_ENABLED ? "on" : "off"} max_per_day=${MAX_POSTS_PER_DAY} min_interval_hours=${MIN_POST_INTERVAL_HOURS} dedupe_days=${DEDUPE_DAYS} ignore_dedupe=${IGNORE_DEDUPE} check_interval_ms=${CHECK_INTERVAL_MS} telegram_polling=${TELEGRAM_POLLING_ENABLED ? "on" : "off"} pinterest_test_mode=${PINTEREST_TEST_MODE ? "on" : "off"}`,
+    `[self-check] service=${SERVICE_NAME} cwd=${info.cwd} state_path=${STATE_PATH} rss_url=${ETSY_SHOP_RSS_URL || "missing"} facebook=${FACEBOOK_ENABLED ? "on" : "off"} instagram=${INSTAGRAM_ENABLED ? "on" : "off"} pinterest=${pinterestStatus.enabled ? "on" : "off"} pinterest_reason=${pinterestStatus.reason} max_per_day=${MAX_POSTS_PER_DAY} min_interval_hours=${MIN_POST_INTERVAL_HOURS} dedupe_days=${DEDUPE_DAYS} ignore_dedupe=${IGNORE_DEDUPE} check_interval_ms=${CHECK_INTERVAL_MS} telegram_polling=${TELEGRAM_POLLING_ENABLED ? "on" : "off"} pinterest_test_mode=${pinterestStatus.testMode ? "on" : "off"}`,
   );
 }
 
@@ -487,6 +484,118 @@ function resolveBooleanToggle(primaryEnv: string, legacyEnv?: string): BooleanTo
     primaryRaw,
     ...(legacyEnv ? { legacyEnv, legacyRaw } : {}),
   };
+}
+
+type PinterestRuntimeConfig = {
+  accessToken: string;
+  boardId: string;
+  toggle: BooleanToggleResolution;
+  testMode: boolean;
+};
+
+export type PinterestStatus = {
+  enabled: boolean;
+  reason:
+    | "enabled"
+    | "pinterest_enabled_false"
+    | "pinterest_access_token_missing"
+    | "pinterest_board_id_missing";
+  missingEnv: string[];
+  accessTokenPresent: boolean;
+  boardIdPresent: boolean;
+  boardId: string | null;
+  toggleRaw: string | null;
+  testMode: boolean;
+};
+
+function resolvePinterestRuntimeConfig(): PinterestRuntimeConfig {
+  return {
+    accessToken: process.env.PINTEREST_ACCESS_TOKEN?.trim() ?? "",
+    boardId: process.env.PINTEREST_BOARD_ID?.trim() ?? "",
+    toggle: resolveBooleanToggle("PINTEREST_ENABLED"),
+    testMode: process.env.PINTEREST_TEST_MODE === "true",
+  };
+}
+
+function getPinterestStatus(config: PinterestRuntimeConfig): PinterestStatus {
+  const toggleExplicitlyDisabled = toBooleanOrUndefined(config.toggle.primaryRaw ?? undefined) === false;
+  const missingEnv: string[] = [];
+
+  if (toggleExplicitlyDisabled) {
+    missingEnv.push("PINTEREST_ENABLED");
+  }
+  if (!config.accessToken) {
+    missingEnv.push("PINTEREST_ACCESS_TOKEN");
+  }
+  if (!config.boardId) {
+    missingEnv.push("PINTEREST_BOARD_ID");
+  }
+
+  const reason: PinterestStatus["reason"] = toggleExplicitlyDisabled
+    ? "pinterest_enabled_false"
+    : !config.accessToken
+      ? "pinterest_access_token_missing"
+      : !config.boardId
+        ? "pinterest_board_id_missing"
+        : "enabled";
+
+  return {
+    enabled: reason === "enabled",
+    reason,
+    missingEnv,
+    accessTokenPresent: Boolean(config.accessToken),
+    boardIdPresent: Boolean(config.boardId),
+    boardId: config.boardId || null,
+    toggleRaw: config.toggle.primaryRaw,
+    testMode: config.testMode,
+  };
+}
+
+function buildPinterestMemoKey(config: PinterestRuntimeConfig): string {
+  return JSON.stringify([
+    config.toggle.primaryRaw ?? "",
+    config.accessToken,
+    config.boardId,
+    config.testMode ? "1" : "0",
+  ]);
+}
+
+export function resolvePinterestStatus(): PinterestStatus {
+  return getPinterestStatus(resolvePinterestRuntimeConfig());
+}
+
+function resolveLoggedPinterestStatus(config = resolvePinterestRuntimeConfig()): PinterestStatus {
+  const memoKey = buildPinterestMemoKey(config);
+  if (pinterestStatusMemo && pinterestStatusMemoKey === memoKey) {
+    return pinterestStatusMemo;
+  }
+
+  const status = getPinterestStatus(config);
+  pinterestStatusMemo = status;
+  pinterestStatusMemoKey = memoKey;
+
+  switch (status.reason) {
+    case "enabled":
+      console.info(
+        status.toggleRaw == null
+          ? "[rss] Pinterest posts enabled (auto-enabled from credentials)."
+          : "[rss] Pinterest posts enabled.",
+      );
+      break;
+    case "pinterest_enabled_false":
+      console.info(
+        '[rss] Pinterest disabled via PINTEREST_ENABLED; set PINTEREST_ENABLED="true" or unset it to auto-enable when credentials are present.',
+      );
+      break;
+    case "pinterest_access_token_missing":
+      console.info("[rss] PINTEREST_ACCESS_TOKEN missing; Pinterest posts disabled.");
+      break;
+    case "pinterest_board_id_missing":
+      console.info("[rss] PINTEREST_BOARD_ID missing; Pinterest posts disabled.");
+      break;
+  }
+
+  return status;
 }
 
 function formatEnvValue(raw: string | null | undefined): string {
@@ -1676,29 +1785,7 @@ function instagramEnabled(): boolean {
 }
 
 function pinterestEnabled(): boolean {
-  if (pinterestEnabledMemo !== null) {
-    return pinterestEnabledMemo;
-  }
-
-  if (!PINTEREST_ENABLED) {
-    pinterestEnabledMemo = false;
-    console.info('[rss] pinterest disabled; skipping (set PINTEREST_ENABLED="true" to enable).');
-    return pinterestEnabledMemo;
-  }
-  if (!PINTEREST_ACCESS_TOKEN) {
-    pinterestEnabledMemo = false;
-    console.info("[rss] PINTEREST_ACCESS_TOKEN missing; Pinterest posts disabled.");
-    return pinterestEnabledMemo;
-  }
-  if (!PINTEREST_BOARD_ID) {
-    pinterestEnabledMemo = false;
-    console.info("[rss] PINTEREST_BOARD_ID missing; Pinterest posts disabled.");
-    return pinterestEnabledMemo;
-  }
-
-  pinterestEnabledMemo = true;
-  console.info("[rss] Pinterest posts enabled.");
-  return pinterestEnabledMemo;
+  return resolveLoggedPinterestStatus().enabled;
 }
 
 function formatTokenFingerprint(token: string): string {
@@ -2755,12 +2842,13 @@ function formatBodyForLog(body: unknown): string {
 }
 
 async function createTestPinterestPin(): Promise<PinterestTestResult> {
-  if (!PINTEREST_ACCESS_TOKEN || !PINTEREST_BOARD_ID) {
+  const pinterest = resolvePinterestRuntimeConfig();
+  if (!pinterest.accessToken || !pinterest.boardId) {
     const missing: string[] = [];
-    if (!PINTEREST_ACCESS_TOKEN) {
+    if (!pinterest.accessToken) {
       missing.push("PINTEREST_ACCESS_TOKEN");
     }
-    if (!PINTEREST_BOARD_ID) {
+    if (!pinterest.boardId) {
       missing.push("PINTEREST_BOARD_ID");
     }
     const message = `[pinterest] smoke test aborted: missing ${missing.join(", ")}`;
@@ -2769,7 +2857,7 @@ async function createTestPinterestPin(): Promise<PinterestTestResult> {
   }
 
   const payload = {
-    board_id: PINTEREST_BOARD_ID,
+    board_id: pinterest.boardId,
     title: PINTEREST_TEST_TITLE,
     description: PINTEREST_TEST_DESCRIPTION,
     link: PINTEREST_TEST_LINK,
@@ -2779,14 +2867,14 @@ async function createTestPinterestPin(): Promise<PinterestTestResult> {
     },
   };
 
-  console.log(`[pinterest] creating test pin on board_id=${PINTEREST_BOARD_ID}`);
+  console.log(`[pinterest] creating test pin on board_id=${pinterest.boardId}`);
 
   const response = await fetch("https://api.pinterest.com/v5/pins", {
     method: "POST",
     headers: {
       accept: "application/json",
       "content-type": "application/json",
-      authorization: `Bearer ${PINTEREST_ACCESS_TOKEN}`,
+      authorization: `Bearer ${pinterest.accessToken}`,
     },
     body: JSON.stringify(payload),
   });
@@ -2822,7 +2910,8 @@ async function postPinterestItem(params: {
   caption: PlatformCaptions["pinterest"];
   image: ResolvedImage | null;
 }): Promise<PublishResult & { pinId: string | null }> {
-  if (!pinterestEnabled()) {
+  const pinterest = resolvePinterestRuntimeConfig();
+  if (!resolveLoggedPinterestStatus(pinterest).enabled) {
     return { ok: true, attempted: false, pinId: null, skippedReason: "pinterest_disabled" };
   }
 
@@ -2841,11 +2930,11 @@ async function postPinterestItem(params: {
   }
 
   console.log(
-    `[rss] STAGE=POST_PINTEREST attempt listing=${params.candidate.listingId} board_id=${PINTEREST_BOARD_ID} image_host=${params.image.imageHost ?? "unknown"} title_len=${title.length}`,
+    `[rss] STAGE=POST_PINTEREST attempt listing=${params.candidate.listingId} board_id=${pinterest.boardId} image_host=${params.image.imageHost ?? "unknown"} title_len=${title.length}`,
   );
 
   const payload = {
-    board_id: PINTEREST_BOARD_ID,
+    board_id: pinterest.boardId,
     title,
     description,
     link: shareAndSaveUrl,
@@ -2861,7 +2950,7 @@ async function postPinterestItem(params: {
       headers: {
         accept: "application/json",
         "content-type": "application/json",
-        authorization: `Bearer ${PINTEREST_ACCESS_TOKEN}`,
+        authorization: `Bearer ${pinterest.accessToken}`,
       },
       body: JSON.stringify(payload),
     });
@@ -3848,8 +3937,9 @@ async function main(): Promise<void> {
   console.log(
     `[rss] telegram.polling.enabled=${TELEGRAM_POLLING_ENABLED} (RSS_TELEGRAM_POLLING=${process.env.RSS_TELEGRAM_POLLING ?? "unset"}, RUN_TELEGRAM_POLLING=${process.env.RUN_TELEGRAM_POLLING ?? "unset"})`,
   );
+  const pinterestStatus = resolvePinterestStatus();
   console.log(
-    `[rss] toggles: FACEBOOK_ENABLED=${FACEBOOK_ENABLED} (FACEBOOK_ENABLED=${formatEnvValue(FACEBOOK_ENABLED_TOGGLE.primaryRaw)}, RSS_FACEBOOK_ENABLED=${formatEnvValue(FACEBOOK_ENABLED_TOGGLE.legacyRaw)}), INSTAGRAM_ENABLED=${INSTAGRAM_ENABLED} (INSTAGRAM_ENABLED=${formatEnvValue(INSTAGRAM_ENABLED_TOGGLE.primaryRaw)}, RSS_INSTAGRAM_ENABLED=${formatEnvValue(INSTAGRAM_ENABLED_TOGGLE.legacyRaw)})`,
+    `[rss] toggles: FACEBOOK_ENABLED=${FACEBOOK_ENABLED} (FACEBOOK_ENABLED=${formatEnvValue(FACEBOOK_ENABLED_TOGGLE.primaryRaw)}, RSS_FACEBOOK_ENABLED=${formatEnvValue(FACEBOOK_ENABLED_TOGGLE.legacyRaw)}), INSTAGRAM_ENABLED=${INSTAGRAM_ENABLED} (INSTAGRAM_ENABLED=${formatEnvValue(INSTAGRAM_ENABLED_TOGGLE.primaryRaw)}, RSS_INSTAGRAM_ENABLED=${formatEnvValue(INSTAGRAM_ENABLED_TOGGLE.legacyRaw)}), PINTEREST_ENABLED=${pinterestStatus.enabled} (PINTEREST_ENABLED=${formatEnvValue(pinterestStatus.toggleRaw)}, access_token=${pinterestStatus.accessTokenPresent ? "set" : "missing"}, board_id=${pinterestStatus.boardIdPresent ? "set" : "missing"}, test_mode=${pinterestStatus.testMode ? "on" : "off"})`,
   );
   if (!RSS_DISABLE_HEALTH_SERVER) {
     const healthServer = createServer((req, res) => {
@@ -3896,6 +3986,7 @@ async function main(): Promise<void> {
             error: `meta_healthcheck_failed:${String(error)}`,
           }));
           const fbStatus = resolveFacebookEnablement();
+          const pinterestStatus = resolvePinterestStatus();
           sendJsonResponse(res, 200, {
             ok: true,
             service: SERVICE_NAME,
@@ -3910,6 +4001,18 @@ async function main(): Promise<void> {
               facebookReason: fbStatus.reason ?? null,
               facebookMissingEnv: fbStatus.missingEnv ?? [],
               instagramEnabled: INSTAGRAM_ENABLED,
+              pinterestEnabled: pinterestStatus.enabled,
+              pinterestReason: pinterestStatus.reason,
+              pinterestMissingEnv: pinterestStatus.missingEnv,
+              pinterestAccessTokenPresent: pinterestStatus.accessTokenPresent,
+              pinterestBoardIdPresent: pinterestStatus.boardIdPresent,
+              pinterestBoardId: pinterestStatus.boardId,
+              pinterestToggleRaw: pinterestStatus.toggleRaw,
+              pinterestTestMode: pinterestStatus.testMode,
+              pinterestTestRouteEnabled:
+                pinterestStatus.testMode &&
+                pinterestStatus.accessTokenPresent &&
+                pinterestStatus.boardIdPresent,
               maxPostsPerDay: MAX_POSTS_PER_DAY,
               minPostIntervalHours: MIN_POST_INTERVAL_HOURS,
               dedupeDays: DEDUPE_DAYS,
@@ -3918,7 +4021,6 @@ async function main(): Promise<void> {
               telegramPollingEnabled: TELEGRAM_POLLING_ENABLED,
               rssInstagramImageOverride: RSS_INSTAGRAM_IMAGE_URL_OVERRIDE || null,
               rssInstagramTestImage: RSS_INSTAGRAM_TEST_IMAGE_URL || null,
-              pinterestTestMode: PINTEREST_TEST_MODE,
               apiTokenProtected: Boolean(ETSY_AUTO_POST_TOKEN),
             },
             meta: {
@@ -3973,7 +4075,12 @@ async function main(): Promise<void> {
           });
         return;
       }
-      if (url.pathname === "/pinterest_test" && PINTEREST_TEST_MODE) {
+      if (url.pathname === "/pinterest_test") {
+        const pinterestStatus = resolvePinterestStatus();
+        if (!pinterestStatus.testMode) {
+          sendJsonResponse(res, 404, { ok: false, error: "not_found" });
+          return;
+        }
         if (req.method !== "POST") {
           sendJsonResponse(res, 405, { ok: false, error: "use POST /pinterest_test" });
           return;
@@ -3988,9 +4095,13 @@ async function main(): Promise<void> {
             if (res.writableEnded) {
               return;
             }
+            if (!result.ok) {
+              pinterestTestTriggered = false;
+            }
             sendJsonResponse(res, result.ok ? 200 : result.status || 500, result);
           })
           .catch((error) => {
+            pinterestTestTriggered = false;
             console.log(`[pinterest] smoke test handler error: ${String(error)}`);
             sendJsonResponse(res, 500, { ok: false, error: "pinterest test handler error" });
           });
@@ -4009,7 +4120,7 @@ async function main(): Promise<void> {
   }
 
   console.log(
-    `RSS watcher boot: service=${SERVICE_NAME} sha=${resolvedBuildInfo?.commitSha ?? "unknown"} rss_url=${ETSY_SHOP_RSS_URL || "missing"} state_path=${STATE_PATH} cwd=${process.cwd()} facebook=${FACEBOOK_ENABLED ? "on" : "off"} instagram=${INSTAGRAM_ENABLED ? "on" : "off"} max_per_day=${MAX_POSTS_PER_DAY} min_interval_hours=${MIN_POST_INTERVAL_HOURS} dedupe_days=${DEDUPE_DAYS} ignore_dedupe=${IGNORE_DEDUPE} check_interval_ms=${CHECK_INTERVAL_MS}`,
+    `RSS watcher boot: service=${SERVICE_NAME} sha=${resolvedBuildInfo?.commitSha ?? "unknown"} rss_url=${ETSY_SHOP_RSS_URL || "missing"} state_path=${STATE_PATH} cwd=${process.cwd()} facebook=${FACEBOOK_ENABLED ? "on" : "off"} instagram=${INSTAGRAM_ENABLED ? "on" : "off"} pinterest=${pinterestStatus.enabled ? "on" : "off"} max_per_day=${MAX_POSTS_PER_DAY} min_interval_hours=${MIN_POST_INTERVAL_HOURS} dedupe_days=${DEDUPE_DAYS} ignore_dedupe=${IGNORE_DEDUPE} check_interval_ms=${CHECK_INTERVAL_MS}`,
   );
   currentState = await loadState();
   await saveState(currentState);
