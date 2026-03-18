@@ -112,10 +112,20 @@ fly secrets set DISCORD_BOT_TOKEN=MTQ...
 ## 4) Deploy
 
 ```bash
+# Run this from the repo root (the directory that contains fly.toml and Dockerfile).
 fly deploy
 ```
 
 First deploy builds the Docker image (~2-3 minutes). Subsequent deploys are faster.
+
+If you're deploying from the Fly dashboard or a GitHub-linked app, make sure the
+**source directory/build context is the repository root**. This repo's Fly
+template expects the root `Dockerfile`. If Fly uploads a nested directory instead,
+the remote builder fails before the build starts with an error like:
+
+```text
+couldn't locate the dockerfile at path Dockerfile in code archive
+```
 
 After deployment, verify:
 
@@ -251,6 +261,22 @@ The gateway is binding to `127.0.0.1` instead of `0.0.0.0`.
 Fly can't reach the gateway on the configured port.
 
 **Fix:** Ensure `internal_port` matches the gateway port (set `--port 3000` or `OPENCLAW_GATEWAY_PORT=3000`).
+
+### `couldn't locate the dockerfile at path Dockerfile in code archive`
+
+Fly did not upload the repository root as the build context.
+
+**What this means:** The root `Dockerfile` exists in this repo, but Fly only sent
+some subdirectory to the remote builder, so `Dockerfile` was missing from the
+uploaded archive.
+
+**Fix:**
+
+1. Run `fly deploy` from the repo root (the directory that contains both
+   `fly.toml` and `Dockerfile`).
+2. If you're using Fly's GitHub integration or dashboard redeploy flow, clear any
+   custom source directory and point it at the repository root.
+3. Redeploy after updating the source directory.
 
 ### OOM / Memory Issues
 

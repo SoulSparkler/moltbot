@@ -5,6 +5,8 @@ app = "openclaw"
 primary_region = "iad" # change to your closest region
 
 [build]
+# Deploy from the repo root. If Fly/GitHub uses a subdirectory as the source
+# context, the remote builder won't see this root Dockerfile and redeploys fail.
 dockerfile = "Dockerfile"
 
 [env]
