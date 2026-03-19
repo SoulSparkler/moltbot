@@ -213,6 +213,20 @@ describe("resolveModel", () => {
     expect(result.error).toBe("Unknown model: openai-codex/gpt-4.1-mini");
   });
 
+  it("builds an openrouter forward-compat fallback for unknown OpenRouter models", () => {
+    const result = resolveModel("openrouter", "openai/chatgpt-4o-latest", "/tmp/agent");
+
+    expect(result.error).toBeUndefined();
+    expect(result.model).toMatchObject({
+      provider: "openrouter",
+      id: "openai/chatgpt-4o-latest",
+      api: "openai-completions",
+      baseUrl: "https://openrouter.ai/api/v1",
+      reasoning: false,
+      input: ["text"],
+    });
+  });
+
   it("uses codex fallback even when openai-codex provider is configured", () => {
     // This test verifies the ordering: codex fallback must fire BEFORE the generic providerCfg fallback.
     // If ordering is wrong, the generic fallback would use api: "openai-responses" (the default)

@@ -20,6 +20,7 @@ type InlineProviderConfig = {
 };
 
 const OPENAI_CODEX_GPT_53_MODEL_ID = "gpt-5.3-codex";
+const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 
 const OPENAI_CODEX_TEMPLATE_MODEL_IDS = ["gpt-5.2-codex"] as const;
 
@@ -197,6 +198,37 @@ function resolveAnthropicUndatedAliasModel(
   return undefined;
 }
 
+function resolveOpenRouterForwardCompatModel(
+  provider: string,
+  modelId: string,
+): Model<Api> | undefined {
+  const normalizedProvider = normalizeProviderId(provider);
+  if (normalizedProvider !== "openrouter") {
+    return undefined;
+  }
+
+  const trimmedModelId = modelId.trim();
+  if (!trimmedModelId) {
+    return undefined;
+  }
+
+  // OpenRouter frequently exposes new or moving model IDs before pi-ai's built-in
+  // catalog learns about them. Fall back to a generic OpenAI-compatible definition
+  // so OpenClaw can still attempt the remote call instead of failing locally.
+  return normalizeModelCompat({
+    id: trimmedModelId,
+    name: trimmedModelId,
+    api: "openai-completions",
+    provider: normalizedProvider,
+    baseUrl: OPENROUTER_BASE_URL,
+    reasoning: false,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: DEFAULT_CONTEXT_TOKENS,
+    maxTokens: DEFAULT_CONTEXT_TOKENS,
+  } as Model<Api>);
+}
+
 export function buildInlineProviderModels(
   providers: Record<string, InlineProviderConfig>,
 ): InlineModelEntry[] {
@@ -313,6 +345,10 @@ export function resolveModel(
         maxTokens: providerCfg?.models?.[0]?.maxTokens ?? DEFAULT_CONTEXT_TOKENS,
       } as Model<Api>);
       return { model: fallbackModel, authStorage, modelRegistry };
+    }
+    const openRouterForwardCompat = resolveOpenRouterForwardCompatModel(provider, modelId);
+    if (openRouterForwardCompat) {
+      return { model: openRouterForwardCompat, authStorage, modelRegistry };
     }
     return {
       error: `Unknown model: ${provider}/${modelId}`,
