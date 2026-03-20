@@ -4,6 +4,7 @@ packages:
   - packages/*
   - extensions/*
   - apps/etsy-auto-post
+  - apps/mission-control
 
 onlyBuiltDependencies:
   - "@lydell/node-pty"
