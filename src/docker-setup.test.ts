@@ -142,19 +142,14 @@ describe("docker-setup.sh", () => {
   it("keeps DigitalOcean compose services aligned to /home/node/.openclaw", async () => {
     const compose = await readFile(join(repoRoot, "docker-compose.yml"), "utf8");
     expect(compose).toContain("mission-control:");
-    expect(compose).toContain("OPENCLAW_STATE_DIR: ${OPENCLAW_STATE_DIR:-/home/node/.openclaw}");
-    expect(compose).toContain(
-      "OPENCLAW_CONFIG_PATH: ${OPENCLAW_CONFIG_PATH:-/home/node/.openclaw/openclaw.json}",
-    );
-    expect(compose).toContain(
-      "OPENCLAW_WORKSPACE_DIR: ${OPENCLAW_WORKSPACE_DIR:-/home/node/.openclaw/workspace}",
-    );
-    expect(compose).toContain(
-      "RSS_STATE_PATH: ${RSS_STATE_PATH:-/home/node/.openclaw/state/etsy_rss.json}",
-    );
-    expect(compose).toContain("CLAWDBOT_STATE_DIR: ${CLAWDBOT_STATE_DIR:-/home/node/.openclaw}");
-    expect(compose).toContain("MOLTBOT_STATE_DIR: ${MOLTBOT_STATE_DIR:-/home/node/.openclaw}");
+    expect(compose).toContain("OPENCLAW_STATE_DIR: /home/node/.openclaw");
+    expect(compose).toContain("OPENCLAW_CONFIG_PATH: /home/node/.openclaw/openclaw.json");
+    expect(compose).toContain("OPENCLAW_WORKSPACE_DIR: /home/node/.openclaw/workspace");
+    expect(compose).toContain("RSS_STATE_PATH: /home/node/.openclaw/state/etsy_rss.json");
+    expect(compose).toContain("CLAWDBOT_STATE_DIR: /home/node/.openclaw");
+    expect(compose).toContain("MOLTBOT_STATE_DIR: /home/node/.openclaw");
     expect(compose).toContain("${OPENCLAW_HOST_DATA_ROOT:-/data/openclaw}:/home/node/.openclaw");
+    expect(compose).not.toContain("${OPENCLAW_STATE_DIR:-/home/node/.openclaw}");
   });
 
   it("keeps droplet deploy script defaults aligned to /home/node/.openclaw", async () => {
@@ -194,5 +189,22 @@ describe("docker-setup.sh", () => {
     expect(prepareDropletScript).toContain(
       'OPENCLAW_ETSY_STATE_DIR="${OPENCLAW_ETSY_STATE_DIR:-${OPENCLAW_DATA_ROOT}/state}"',
     );
+  });
+
+  it("keeps DigitalOcean examples aligned to container paths under /home/node/.openclaw", async () => {
+    const envExample = await readFile(join(repoRoot, ".env.example"), "utf8");
+    const digitalOceanExample = await readFile(
+      join(repoRoot, "deploy", "digitalocean", "openclaw.example.json5"),
+      "utf8",
+    );
+
+    expect(envExample).toContain("OPENCLAW_STATE_DIR=/home/node/.openclaw");
+    expect(envExample).toContain("OPENCLAW_CONFIG_PATH=/home/node/.openclaw/openclaw.json");
+    expect(envExample).toContain("OPENCLAW_WORKSPACE_DIR=/home/node/.openclaw/workspace");
+    expect(envExample).toContain("RSS_STATE_PATH=/home/node/.openclaw/state/etsy_rss.json");
+
+    expect(digitalOceanExample).toContain('file: "/home/node/.openclaw/logs/openclaw.log"');
+    expect(digitalOceanExample).toContain('workspace: "/home/node/.openclaw/workspace/jannetje"');
+    expect(digitalOceanExample).not.toContain('workspace: "/data/openclaw/workspace/');
   });
 });

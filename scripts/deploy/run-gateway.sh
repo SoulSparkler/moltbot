@@ -1,6 +1,46 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+rewrite_legacy_container_paths() {
+  local config_path="$1"
+  local state_dir="$2"
+  local workspace_dir="$3"
+  local log_dir="$4"
+  local rss_state_path="$5"
+  local canonical_config_path="${state_dir}/openclaw.json"
+
+  node --input-type=module - "$config_path" "$state_dir" "$workspace_dir" "$log_dir" "$rss_state_path" "$canonical_config_path" <<'EOF'
+import fs from "node:fs";
+
+const [configPath, stateDir, workspaceDir, logDir, rssStatePath, canonicalConfigPath] = process.argv.slice(2);
+const original = fs.readFileSync(configPath, "utf8");
+const replacements = [
+  ["/data/openclaw/workspace", workspaceDir],
+  ["/data/.openclaw/workspace", workspaceDir],
+  ["/data/workspace", workspaceDir],
+  ["/data/openclaw/logs", logDir],
+  ["/data/.openclaw/logs", logDir],
+  ["/data/openclaw/state/etsy_rss.json", rssStatePath],
+  ["/data/.openclaw/state/etsy_rss.json", rssStatePath],
+  ["/data/openclaw/state/openclaw.json", canonicalConfigPath],
+  ["/data/openclaw/openclaw.json", canonicalConfigPath],
+  ["/data/.openclaw/openclaw.json", canonicalConfigPath],
+  ["/data/openclaw", stateDir],
+  ["/data/.openclaw", stateDir],
+];
+
+let updated = original;
+for (const [from, to] of replacements) {
+  updated = updated.split(from).join(to);
+}
+
+if (updated !== original) {
+  fs.writeFileSync(configPath, updated);
+  console.log(`[deploy] Rewrote legacy /data container paths in ${configPath}`);
+}
+EOF
+}
+
 OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-/home/node/.openclaw}"
 OPENCLAW_CONFIG_PATH="${OPENCLAW_CONFIG_PATH:-${OPENCLAW_STATE_DIR}/openclaw.json}"
 OPENCLAW_WORKSPACE_DIR="${OPENCLAW_WORKSPACE_DIR:-${OPENCLAW_STATE_DIR}/workspace}"
@@ -33,6 +73,13 @@ if [[ ! -f "$OPENCLAW_CONFIG_PATH" ]]; then
   echo "[deploy] Copy deploy/digitalocean/openclaw.example.json5 to that path before starting the gateway." >&2
   exit 1
 fi
+
+rewrite_legacy_container_paths \
+  "$OPENCLAW_CONFIG_PATH" \
+  "$OPENCLAW_STATE_DIR" \
+  "$OPENCLAW_WORKSPACE_DIR" \
+  "$OPENCLAW_LOG_DIR" \
+  "$RSS_STATE_PATH"
 
 echo "[deploy] Gateway config path: $OPENCLAW_CONFIG_PATH"
 echo "[deploy] Gateway state dir: $OPENCLAW_STATE_DIR"

@@ -148,6 +148,8 @@ Edit `/data/openclaw/openclaw.json` and adjust:
 - model configuration
 - any hooks or tool settings
 
+If you copied `openclaw.example.json5` from an older checkout, replace any legacy `/data/openclaw/...`, `/data/.openclaw/...`, or `/data/workspace/...` container paths inside `/data/openclaw/openclaw.json` with `/home/node/.openclaw/...` before restarting the stack.
+
 The example uses three agents:
 
 - `jannetje`

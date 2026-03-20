@@ -10,19 +10,19 @@
   },
 
   logging: {
-    file: "/data/openclaw/logs/openclaw.log",
+    file: "/home/node/.openclaw/logs/openclaw.log",
   },
 
   agents: {
     defaults: {
-      workspace: "/data/openclaw/workspace/jannetje",
+      workspace: "/home/node/.openclaw/workspace/jannetje",
     },
     list: [
       {
         id: "jannetje",
         default: true,
         name: "Jannetje",
-        workspace: "/data/openclaw/workspace/jannetje",
+        workspace: "/home/node/.openclaw/workspace/jannetje",
         identity: {
           name: "Jannetje",
         },
@@ -30,7 +30,7 @@
       {
         id: "beppie",
         name: "Beppie",
-        workspace: "/data/openclaw/workspace/beppie",
+        workspace: "/home/node/.openclaw/workspace/beppie",
         identity: {
           name: "Beppie",
         },
@@ -38,7 +38,7 @@
       {
         id: "cornelis",
         name: "Cornelis",
-        workspace: "/data/openclaw/workspace/cornelis",
+        workspace: "/home/node/.openclaw/workspace/cornelis",
         identity: {
           name: "Cornelis",
         },

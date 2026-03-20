@@ -10,13 +10,13 @@ services:
       HOME: /home/node
       NODE_ENV: production
       TERM: xterm-256color
-      OPENCLAW_STATE_DIR: ${OPENCLAW_STATE_DIR:-/home/node/.openclaw}
-      OPENCLAW_CONFIG_PATH: ${OPENCLAW_CONFIG_PATH:-/home/node/.openclaw/openclaw.json}
-      OPENCLAW_WORKSPACE_DIR: ${OPENCLAW_WORKSPACE_DIR:-/home/node/.openclaw/workspace}
-      OPENCLAW_LOG_DIR: ${OPENCLAW_LOG_DIR:-/home/node/.openclaw/logs}
-      CLAWDBOT_STATE_DIR: ${CLAWDBOT_STATE_DIR:-/home/node/.openclaw}
-      MOLTBOT_STATE_DIR: ${MOLTBOT_STATE_DIR:-/home/node/.openclaw}
-      RSS_STATE_PATH: ${RSS_STATE_PATH:-/home/node/.openclaw/state/etsy_rss.json}
+      OPENCLAW_STATE_DIR: /home/node/.openclaw
+      OPENCLAW_CONFIG_PATH: /home/node/.openclaw/openclaw.json
+      OPENCLAW_WORKSPACE_DIR: /home/node/.openclaw/workspace
+      OPENCLAW_LOG_DIR: /home/node/.openclaw/logs
+      CLAWDBOT_STATE_DIR: /home/node/.openclaw
+      MOLTBOT_STATE_DIR: /home/node/.openclaw
+      RSS_STATE_PATH: /home/node/.openclaw/state/etsy_rss.json
       OPENCLAW_GATEWAY_BIND: ${OPENCLAW_GATEWAY_BIND:-lan}
       OPENCLAW_GATEWAY_PORT: ${OPENCLAW_GATEWAY_PORT:-18789}
       OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN}
@@ -38,13 +38,13 @@ services:
     environment:
       HOME: /home/node
       NODE_ENV: production
-      OPENCLAW_STATE_DIR: ${OPENCLAW_STATE_DIR:-/home/node/.openclaw}
-      OPENCLAW_CONFIG_PATH: ${OPENCLAW_CONFIG_PATH:-/home/node/.openclaw/openclaw.json}
-      OPENCLAW_MISSION_CONTROL_CONFIG_PATH: ${OPENCLAW_MISSION_CONTROL_CONFIG_PATH:-/home/node/.openclaw/openclaw.json}
+      OPENCLAW_STATE_DIR: /home/node/.openclaw
+      OPENCLAW_CONFIG_PATH: /home/node/.openclaw/openclaw.json
+      OPENCLAW_MISSION_CONTROL_CONFIG_PATH: /home/node/.openclaw/openclaw.json
       OPENCLAW_MISSION_CONTROL_GATEWAY_URL: ${OPENCLAW_MISSION_CONTROL_GATEWAY_URL:-ws://openclaw-gateway:18789}
       OPENCLAW_MISSION_CONTROL_GATEWAY_TOKEN: ${OPENCLAW_MISSION_CONTROL_GATEWAY_TOKEN}
-      CLAWDBOT_STATE_DIR: ${CLAWDBOT_STATE_DIR:-/home/node/.openclaw}
-      MOLTBOT_STATE_DIR: ${MOLTBOT_STATE_DIR:-/home/node/.openclaw}
+      CLAWDBOT_STATE_DIR: /home/node/.openclaw
+      MOLTBOT_STATE_DIR: /home/node/.openclaw
       MISSION_CONTROL_HOST: ${MISSION_CONTROL_HOST:-0.0.0.0}
       MISSION_CONTROL_PORT: ${MISSION_CONTROL_PORT:-3021}
     volumes:
@@ -63,11 +63,11 @@ services:
     environment:
       HOME: /home/node
       TERM: xterm-256color
-      OPENCLAW_STATE_DIR: ${OPENCLAW_STATE_DIR:-/home/node/.openclaw}
-      OPENCLAW_CONFIG_PATH: ${OPENCLAW_CONFIG_PATH:-/home/node/.openclaw/openclaw.json}
-      OPENCLAW_WORKSPACE_DIR: ${OPENCLAW_WORKSPACE_DIR:-/home/node/.openclaw/workspace}
-      CLAWDBOT_STATE_DIR: ${CLAWDBOT_STATE_DIR:-/home/node/.openclaw}
-      MOLTBOT_STATE_DIR: ${MOLTBOT_STATE_DIR:-/home/node/.openclaw}
+      OPENCLAW_STATE_DIR: /home/node/.openclaw
+      OPENCLAW_CONFIG_PATH: /home/node/.openclaw/openclaw.json
+      OPENCLAW_WORKSPACE_DIR: /home/node/.openclaw/workspace
+      CLAWDBOT_STATE_DIR: /home/node/.openclaw
+      MOLTBOT_STATE_DIR: /home/node/.openclaw
       OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN}
       BROWSER: echo
     volumes:
