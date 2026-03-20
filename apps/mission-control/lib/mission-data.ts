@@ -341,10 +341,17 @@ export async function getMissionControlSnapshot(): Promise<MissionSnapshot> {
     const globalSubagentTools = asRecord(asRecord(globalTools?.subagents)?.tools);
     const gatewayAgents = Array.isArray(agentsResult.agents) ? agentsResult.agents : [];
     const sessions = Array.isArray(sessionsResult.sessions) ? sessionsResult.sessions : [];
-    const agentIds = uniqueStrings([
-      agentsResult.defaultId,
+    const discoveredAgentIds = uniqueStrings([
       ...gatewayAgents.map((agent) => agent.id),
+      ...Array.from(byId.keys()),
       ...sessions.map((session) => parseSessionAgentId(session.key)),
+    ]);
+    const defaultAgentId = asString(agentsResult.defaultId);
+    const agentIds = uniqueStrings([
+      ...(defaultAgentId && (defaultAgentId !== "main" || discoveredAgentIds.includes(defaultAgentId))
+        ? [defaultAgentId]
+        : []),
+      ...discoveredAgentIds,
     ]);
     const skillReports = await loadSkillReports(agentIds, connection);
     const tools = agentIds.flatMap((agentId) =>
