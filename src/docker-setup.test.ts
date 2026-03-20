@@ -138,4 +138,61 @@ describe("docker-setup.sh", () => {
     expect(compose).not.toContain("gateway-daemon");
     expect(compose).toContain('"gateway"');
   });
+
+  it("keeps DigitalOcean compose services aligned to /home/node/.openclaw", async () => {
+    const compose = await readFile(join(repoRoot, "docker-compose.yml"), "utf8");
+    expect(compose).toContain("mission-control:");
+    expect(compose).toContain("OPENCLAW_STATE_DIR: ${OPENCLAW_STATE_DIR:-/home/node/.openclaw}");
+    expect(compose).toContain(
+      "OPENCLAW_CONFIG_PATH: ${OPENCLAW_CONFIG_PATH:-/home/node/.openclaw/openclaw.json}",
+    );
+    expect(compose).toContain(
+      "OPENCLAW_WORKSPACE_DIR: ${OPENCLAW_WORKSPACE_DIR:-/home/node/.openclaw/workspace}",
+    );
+    expect(compose).toContain(
+      "RSS_STATE_PATH: ${RSS_STATE_PATH:-/home/node/.openclaw/state/etsy_rss.json}",
+    );
+    expect(compose).toContain("CLAWDBOT_STATE_DIR: ${CLAWDBOT_STATE_DIR:-/home/node/.openclaw}");
+    expect(compose).toContain("MOLTBOT_STATE_DIR: ${MOLTBOT_STATE_DIR:-/home/node/.openclaw}");
+    expect(compose).toContain("${OPENCLAW_HOST_DATA_ROOT:-/data/openclaw}:/home/node/.openclaw");
+  });
+
+  it("keeps droplet deploy script defaults aligned to /home/node/.openclaw", async () => {
+    const gatewayScript = await readFile(
+      join(repoRoot, "scripts", "deploy", "run-gateway.sh"),
+      "utf8",
+    );
+    const missionControlScript = await readFile(
+      join(repoRoot, "scripts", "deploy", "run-mission-control.sh"),
+      "utf8",
+    );
+    const prepareDropletScript = await readFile(
+      join(repoRoot, "scripts", "deploy", "prepare-droplet.sh"),
+      "utf8",
+    );
+
+    expect(gatewayScript).toContain(
+      'OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-/home/node/.openclaw}"',
+    );
+    expect(gatewayScript).toContain(
+      'OPENCLAW_WORKSPACE_DIR="${OPENCLAW_WORKSPACE_DIR:-${OPENCLAW_STATE_DIR}/workspace}"',
+    );
+    expect(gatewayScript).toContain(
+      'RSS_STATE_PATH="${RSS_STATE_PATH:-${OPENCLAW_STATE_DIR}/state/etsy_rss.json}"',
+    );
+
+    expect(missionControlScript).toContain(
+      'OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-/home/node/.openclaw}"',
+    );
+    expect(missionControlScript).toContain(
+      'OPENCLAW_MISSION_CONTROL_CONFIG_PATH="${OPENCLAW_MISSION_CONTROL_CONFIG_PATH:-${OPENCLAW_CONFIG_PATH}}"',
+    );
+
+    expect(prepareDropletScript).toContain(
+      'OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-${OPENCLAW_DATA_ROOT}}"',
+    );
+    expect(prepareDropletScript).toContain(
+      'OPENCLAW_ETSY_STATE_DIR="${OPENCLAW_ETSY_STATE_DIR:-${OPENCLAW_DATA_ROOT}/state}"',
+    );
+  });
 });

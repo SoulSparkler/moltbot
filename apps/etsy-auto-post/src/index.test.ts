@@ -15,6 +15,7 @@ import {
   buildInstagramCaption,
   buildPinterestCaption,
   resolvePinterestStatus,
+  resolveDefaultStatePath,
   toEnglishFetchUrl,
   stripEtsyShopSuffix,
 } from "./index.js";
@@ -65,6 +66,20 @@ describe("extractListingId", () => {
       "987654321",
     );
     expect(extractListingId("https://www.etsy.com/listing/55555/abc")).toBe("55555");
+  });
+});
+
+describe("resolveDefaultStatePath", () => {
+  it("derives the watcher state path from OPENCLAW_STATE_DIR when available", () => {
+    expect(
+      resolveDefaultStatePath({ OPENCLAW_STATE_DIR: "/home/node/.openclaw" } as NodeJS.ProcessEnv),
+    ).toBe("/home/node/.openclaw/state/etsy_rss.json");
+  });
+
+  it("falls back to legacy state-dir envs when OPENCLAW_STATE_DIR is absent", () => {
+    expect(
+      resolveDefaultStatePath({ CLAWDBOT_STATE_DIR: "/var/lib/openclaw" } as NodeJS.ProcessEnv),
+    ).toBe("/var/lib/openclaw/state/etsy_rss.json");
   });
 });
 

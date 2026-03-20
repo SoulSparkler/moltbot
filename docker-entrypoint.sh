@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Prefer configured state dir (or /data/.openclaw), but fall back when not writable
-STATE_DIR_CANDIDATE="${OPENCLAW_STATE_DIR:-/data/.openclaw}"
+# Prefer configured state dir (or /home/node/.openclaw), but fall back when not writable
+STATE_DIR_CANDIDATE="${OPENCLAW_STATE_DIR:-/home/node/.openclaw}"
 mkdir -p "$STATE_DIR_CANDIDATE" 2>/dev/null || true
 if [ -w "$STATE_DIR_CANDIDATE" ]; then
     OPENCLAW_STATE_DIR="$STATE_DIR_CANDIDATE"
@@ -57,7 +57,7 @@ echo "[entrypoint] Config path: $OPENCLAW_CONFIG_PATH"
 export OPENCLAW_GATEWAY_PORT
 
 # Workspace directory (single source of truth: OPENCLAW_WORKSPACE_DIR)
-DEFAULT_OPENCLAW_WORKSPACE_DIR="/data/workspace"
+DEFAULT_OPENCLAW_WORKSPACE_DIR="/home/node/.openclaw/workspace"
 WORKSPACE_DIR_CANDIDATE="${OPENCLAW_WORKSPACE_DIR:-$DEFAULT_OPENCLAW_WORKSPACE_DIR}"
 mkdir -p "$WORKSPACE_DIR_CANDIDATE" 2>/dev/null || true
 if [ ! -w "$WORKSPACE_DIR_CANDIDATE" ]; then
@@ -104,6 +104,13 @@ if [ "$(id -u)" -eq 0 ] && command -v su >/dev/null 2>&1; then
     fi
 fi
 
+if [ -z "${RSS_STATE_PATH:-}" ]; then
+    RSS_STATE_PATH="$OPENCLAW_STATE_DIR/state/etsy_rss.json"
+fi
+mkdir -p "$(dirname "$RSS_STATE_PATH")" 2>/dev/null || true
+export RSS_STATE_PATH
+echo "[entrypoint] Etsy state path: $RSS_STATE_PATH"
+
 bootstrap_workspace_files() {
     local workspace_dir="$OPENCLAW_WORKSPACE_DIR"
     local script_dir template_dir=""
@@ -121,7 +128,7 @@ bootstrap_workspace_files() {
         fi
     done
     local required_files=( "AGENTS.md" "IDENTITY.md" "SOUL.md" "TOOLS.md" )
-    local legacy_dirs_raw="${OPENCLAW_WORKSPACE_LEGACY_DIRS:-/data/workspace,/data/.openclaw/workspace}"
+    local legacy_dirs_raw="${OPENCLAW_WORKSPACE_LEGACY_DIRS:-/home/node/.openclaw/workspace,/data/workspace,/data/.openclaw/workspace}"
     local legacy_dirs=()
     IFS=',' read -r -a legacy_dirs <<< "$legacy_dirs_raw"
 
@@ -653,7 +660,7 @@ cfg.agents.defaults = cfg.agents.defaults || {};
 const resolvedWorkspace =
   resolveHomeRelativePath(process.env.OPENCLAW_WORKSPACE_DIR || '') ||
   resolveHomeRelativePath(cfg.agents.defaults.workspace || '') ||
-  '/data/workspace';
+  '/home/node/.openclaw/workspace';
 cfg.agents.defaults.workspace = resolvedWorkspace;
 
 const primaryModel = 'anthropic/claude-sonnet-4-5';
@@ -855,6 +862,7 @@ const sourceDirs = [
   resolveHomeRelativePath(process.env.OPENCLAW_WORKSPACE_DIR || ''),
   resolveHomeRelativePath(cfg.agents.defaults.workspace || ''),
   resolveHomeRelativePath(jannetje.workspace || ''),
+  '/home/node/.openclaw/workspace',
   '/data/workspace',
   '/data/.openclaw/workspace',
 ]
@@ -889,9 +897,8 @@ NODE
         prefix=( "node" "/app/openclaw.mjs" "gateway" "run" )
         set -- "${prefix[@]}" "${@:2}"
     else
-        # Preserve the node/dist prefix and the gateway subcommand
-        prefix=( "$1" "$2" "gateway" )
-        set -- "${prefix[@]}" "${@:3}"
+        # Preserve the original command so gateway is not duplicated.
+        set -- "$@"
     fi
 
     has_flag() {

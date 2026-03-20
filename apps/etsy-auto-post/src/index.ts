@@ -46,8 +46,8 @@ const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 const TELEGRAM_POLL_TIMEOUT_SECONDS = 25;
 const MAX_SEEN_IDS = 500;
-const DEFAULT_STATE_PATH = "/data/.openclaw/state/etsy_rss.json";
-const STATE_PATH = resolveStatePath(process.env.RSS_STATE_PATH, DEFAULT_STATE_PATH);
+const LEGACY_DEFAULT_STATE_PATH = "/data/.openclaw/state/etsy_rss.json";
+const STATE_PATH = resolveStatePath(process.env.RSS_STATE_PATH, resolveDefaultStatePath());
 const META_REQUIRED_PERMISSIONS = [
   "pages_show_list",
   "pages_read_engagement",
@@ -290,6 +290,21 @@ function resolvePublicBaseUrl(): string | null {
   const railwayDomain = process.env.RAILWAY_PUBLIC_DOMAIN?.trim();
   if (railwayDomain) {return `https://${railwayDomain}`;}
   return null;
+}
+
+export function resolveDefaultStatePath(env: NodeJS.ProcessEnv = process.env): string {
+  const stateDir =
+    env.OPENCLAW_STATE_DIR?.trim() ||
+    env.CLAWDBOT_STATE_DIR?.trim() ||
+    env.MOLTBOT_STATE_DIR?.trim();
+  if (stateDir) {
+    const trimmed = stateDir.replace(/[\\/]+$/, "");
+    if (trimmed.includes("\\") && !trimmed.includes("/")) {
+      return `${trimmed}\\state\\etsy_rss.json`;
+    }
+    return `${trimmed}/state/etsy_rss.json`;
+  }
+  return LEGACY_DEFAULT_STATE_PATH;
 }
 
 function resolveStatePath(overrideRaw: string | undefined, fallback: string): string {

@@ -18,7 +18,7 @@ set -euo pipefail
 if [[ "\${1:-}" == "-" || "\${1:-}" == "-e" ]]; then
   exec "$REAL_NODE_PATH" "$@"
 fi
-echo "CMD:$* PORT=\${PORT:-} RSS_DISABLE_HEALTH_SERVER=\${RSS_DISABLE_HEALTH_SERVER:-} ETSY_AUTO_POST_TOKEN=\${ETSY_AUTO_POST_TOKEN:-}" >>"$NODE_STUB_LOG"
+echo "CMD:$* PORT=\${PORT:-} RSS_DISABLE_HEALTH_SERVER=\${RSS_DISABLE_HEALTH_SERVER:-} ETSY_AUTO_POST_TOKEN=\${ETSY_AUTO_POST_TOKEN:-} RSS_STATE_PATH=\${RSS_STATE_PATH:-}" >>"$NODE_STUB_LOG"
 exit 0
 `;
 
@@ -178,6 +178,7 @@ describe("docker-entrypoint.sh", () => {
     expect(nodeLog).toContain("fake-etsy-entry.js");
     expect(nodeLog).toContain("PORT=8081");
     expect(nodeLog).toContain("RSS_DISABLE_HEALTH_SERVER=0");
+    expect(nodeLog).toContain(`RSS_STATE_PATH=${stateDir}/state/etsy_rss.json`);
   });
 
   it("copies missing onboarding files from legacy workspace before templates", async () => {
@@ -221,5 +222,52 @@ describe("docker-entrypoint.sh", () => {
     expect(result.status).toBe(0);
     expect(await readFile(join(workspaceDir, "AGENTS.md"), "utf8")).toContain("legacy agents");
     expect(await readFile(join(workspaceDir, "IDENTITY.md"), "utf8")).toContain("Jannetje");
+  });
+
+  it("preserves explicit node gateway commands without duplicating gateway", async () => {
+    if (!hasBash()) {
+      return;
+    }
+
+    const rootDir = await mkdtemp(join(tmpdir(), "openclaw-entrypoint-"));
+    const scriptPath = await installEntrypoint(rootDir);
+    const binDir = join(rootDir, "bin");
+    const nodeLogPath = join(rootDir, "node-stub.log");
+    const stateDir = join(rootDir, "state");
+    const workspaceDir = join(rootDir, "workspace-active");
+    const configPath = join(stateDir, "openclaw.json");
+
+    await seedWorkspaceTemplates(rootDir);
+    await writeNodeStub(binDir, nodeLogPath);
+
+    const env = {
+      ...process.env,
+      PATH: `${binDir}:${process.env.PATH ?? ""}`,
+      REAL_NODE_PATH: process.execPath.replace(/\\/g, "/"),
+      NODE_STUB_LOG: nodeLogPath,
+      OPENCLAW_STATE_DIR: stateDir,
+      OPENCLAW_CONFIG_PATH: configPath,
+      OPENCLAW_WORKSPACE_DIR: workspaceDir,
+      OPENCLAW_GATEWAY_TOKEN: "test-gateway-token",
+      PORT: "18082",
+    };
+
+    const result = spawnSync(
+      "bash",
+      [scriptPath, "node", "dist/index.js", "gateway", "--bind", "lan", "--port", "18789"],
+      {
+        cwd: rootDir,
+        env,
+        encoding: "utf8",
+      },
+    );
+
+    expect(result.status).toBe(0);
+
+    const nodeLog = await readFile(nodeLogPath, "utf8");
+    expect(nodeLog).toContain(
+      "CMD:dist/index.js gateway --bind lan --port 18789 --allow-unconfigured",
+    );
+    expect(nodeLog).not.toContain("gateway gateway");
   });
 });
