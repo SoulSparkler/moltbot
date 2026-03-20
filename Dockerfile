@@ -19,6 +19,7 @@ RUN if [ -n "$OPENCLAW_DOCKER_APT_PACKAGES" ]; then \
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
 COPY ui/package.json ./ui/package.json
 COPY apps/etsy-auto-post/package.json ./apps/etsy-auto-post/package.json
+COPY apps/mission-control/package.json ./apps/mission-control/package.json
 COPY patches ./patches
 COPY scripts ./scripts
 
@@ -29,6 +30,7 @@ RUN OPENCLAW_A2UI_SKIP_MISSING=1 pnpm build
 # Force pnpm for UI build (Bun may fail on ARM/Synology architectures)
 ENV OPENCLAW_PREFER_PNPM=1
 RUN pnpm ui:build
+RUN pnpm mission-control:build
 RUN pnpm --filter etsy-auto-post build
 
 ENV NODE_ENV=production

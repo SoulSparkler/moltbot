@@ -1,0 +1,48 @@
+{
+  gateway: {
+    mode: "local",
+    bind: "lan",
+    port: 18789,
+    auth: {
+      mode: "token",
+      token: "${OPENCLAW_GATEWAY_TOKEN}",
+    },
+  },
+
+  logging: {
+    file: "/data/openclaw/logs/openclaw.log",
+  },
+
+  agents: {
+    defaults: {
+      workspace: "/data/openclaw/workspace/jannetje",
+    },
+    list: [
+      {
+        id: "jannetje",
+        default: true,
+        name: "Jannetje",
+        workspace: "/data/openclaw/workspace/jannetje",
+        identity: {
+          name: "Jannetje",
+        },
+      },
+      {
+        id: "beppie",
+        name: "Beppie",
+        workspace: "/data/openclaw/workspace/beppie",
+        identity: {
+          name: "Beppie",
+        },
+      },
+      {
+        id: "cornelis",
+        name: "Cornelis",
+        workspace: "/data/openclaw/workspace/cornelis",
+        identity: {
+          name: "Cornelis",
+        },
+      },
+    ],
+  },
+}

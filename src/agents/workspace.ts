@@ -11,6 +11,13 @@ export function resolveDefaultAgentWorkspaceDir(
   env: NodeJS.ProcessEnv = process.env,
   homedir: () => string = os.homedir,
 ): string {
+  const explicitWorkspace =
+    env.OPENCLAW_WORKSPACE_DIR?.trim() ||
+    env.CLAWDBOT_WORKSPACE_DIR?.trim() ||
+    env.MOLTBOT_WORKSPACE_DIR?.trim();
+  if (explicitWorkspace) {
+    return resolveUserPath(explicitWorkspace);
+  }
   const home = resolveRequiredHomeDir(env, homedir);
   const profile = env.OPENCLAW_PROFILE?.trim();
   if (profile && profile.toLowerCase() !== "default") {

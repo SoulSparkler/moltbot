@@ -1,46 +1,70 @@
 services:
   openclaw-gateway:
     image: ${OPENCLAW_IMAGE:-openclaw:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
     environment:
       HOME: /home/node
+      NODE_ENV: production
       TERM: xterm-256color
+      OPENCLAW_STATE_DIR: ${OPENCLAW_STATE_DIR:-/data/openclaw/state}
+      OPENCLAW_CONFIG_PATH: ${OPENCLAW_CONFIG_PATH:-/data/openclaw/state/openclaw.json}
+      OPENCLAW_WORKSPACE_DIR: ${OPENCLAW_WORKSPACE_DIR:-/data/openclaw/workspace/jannetje}
+      OPENCLAW_LOG_DIR: ${OPENCLAW_LOG_DIR:-/data/openclaw/logs}
+      OPENCLAW_GATEWAY_BIND: ${OPENCLAW_GATEWAY_BIND:-lan}
+      OPENCLAW_GATEWAY_PORT: ${OPENCLAW_GATEWAY_PORT:-18789}
       OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN}
-      CLAUDE_AI_SESSION_KEY: ${CLAUDE_AI_SESSION_KEY}
-      CLAUDE_WEB_SESSION_KEY: ${CLAUDE_WEB_SESSION_KEY}
-      CLAUDE_WEB_COOKIE: ${CLAUDE_WEB_COOKIE}
     volumes:
-      - ${OPENCLAW_CONFIG_DIR}:/home/node/.openclaw
-      - ${OPENCLAW_WORKSPACE_DIR}:/home/node/.openclaw/workspace
+      - ${OPENCLAW_HOST_DATA_ROOT:-/data/openclaw}:/data/openclaw
     ports:
-      - "${OPENCLAW_GATEWAY_PORT:-18789}:18789"
-      - "${OPENCLAW_BRIDGE_PORT:-18790}:18790"
+      - "${OPENCLAW_GATEWAY_PUBLISH_HOST:-0.0.0.0}:${OPENCLAW_GATEWAY_PORT:-18789}:${OPENCLAW_GATEWAY_PORT:-18789}"
+    entrypoint: ["bash", "/app/scripts/deploy/run-gateway.sh"]
+    command: ["gateway", "run"]
     init: true
     restart: unless-stopped
-    command:
-      [
-        "node",
-        "dist/index.js",
-        "gateway",
-        "--bind",
-        "${OPENCLAW_GATEWAY_BIND:-lan}",
-        "--port",
-        "18789",
-      ]
+
+  mission-control:
+    image: ${OPENCLAW_IMAGE:-openclaw:local}
+    depends_on:
+      - openclaw-gateway
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      OPENCLAW_STATE_DIR: ${OPENCLAW_STATE_DIR:-/data/openclaw/state}
+      OPENCLAW_CONFIG_PATH: ${OPENCLAW_CONFIG_PATH:-/data/openclaw/state/openclaw.json}
+      OPENCLAW_MISSION_CONTROL_CONFIG_PATH: ${OPENCLAW_CONFIG_PATH:-/data/openclaw/state/openclaw.json}
+      OPENCLAW_MISSION_CONTROL_GATEWAY_URL: ${OPENCLAW_MISSION_CONTROL_GATEWAY_URL:-ws://openclaw-gateway:18789}
+      OPENCLAW_MISSION_CONTROL_GATEWAY_TOKEN: ${OPENCLAW_MISSION_CONTROL_GATEWAY_TOKEN}
+      MISSION_CONTROL_HOST: ${MISSION_CONTROL_HOST:-0.0.0.0}
+      MISSION_CONTROL_PORT: ${MISSION_CONTROL_PORT:-3021}
+    volumes:
+      - ${OPENCLAW_HOST_DATA_ROOT:-/data/openclaw}:/data/openclaw:ro
+    ports:
+      - "${MISSION_CONTROL_PUBLISH_HOST:-127.0.0.1}:${MISSION_CONTROL_PORT:-3021}:${MISSION_CONTROL_PORT:-3021}"
+    entrypoint: ["bash", "/app/scripts/deploy/run-mission-control.sh"]
+    init: true
+    restart: unless-stopped
 
   openclaw-cli:
     image: ${OPENCLAW_IMAGE:-openclaw:local}
+    profiles: ["cli"]
+    env_file:
+      - .env
     environment:
       HOME: /home/node
       TERM: xterm-256color
+      OPENCLAW_STATE_DIR: ${OPENCLAW_STATE_DIR:-/data/openclaw/state}
+      OPENCLAW_CONFIG_PATH: ${OPENCLAW_CONFIG_PATH:-/data/openclaw/state/openclaw.json}
+      OPENCLAW_WORKSPACE_DIR: ${OPENCLAW_WORKSPACE_DIR:-/data/openclaw/workspace/jannetje}
       OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN}
       BROWSER: echo
-      CLAUDE_AI_SESSION_KEY: ${CLAUDE_AI_SESSION_KEY}
-      CLAUDE_WEB_SESSION_KEY: ${CLAUDE_WEB_SESSION_KEY}
-      CLAUDE_WEB_COOKIE: ${CLAUDE_WEB_COOKIE}
     volumes:
-      - ${OPENCLAW_CONFIG_DIR}:/home/node/.openclaw
-      - ${OPENCLAW_WORKSPACE_DIR}:/home/node/.openclaw/workspace
+      - ${OPENCLAW_HOST_DATA_ROOT:-/data/openclaw}:/data/openclaw
+    entrypoint: ["node", "/app/openclaw.mjs"]
     stdin_open: true
     tty: true
     init: true
-    entrypoint: ["node", "dist/index.js"]

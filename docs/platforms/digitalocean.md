@@ -1,8 +1,9 @@
 ---
-summary: "OpenClaw on DigitalOcean (simple paid VPS option)"
+summary: "Run OpenClaw and Mission Control on one DigitalOcean Droplet with Docker Compose and one shared data root"
 read_when:
-  - Setting up OpenClaw on DigitalOcean
-  - Looking for cheap VPS hosting for OpenClaw
+  - Moving OpenClaw off Railway or a laptop
+  - Setting up one canonical Droplet home for runtime state and workspaces
+  - Running OpenClaw and Mission Control together on Docker Compose
 title: "DigitalOcean"
 ---
 
@@ -10,253 +11,234 @@ title: "DigitalOcean"
 
 ## Goal
 
-Run a persistent OpenClaw Gateway on DigitalOcean for **$6/month** (or $4/mo with reserved pricing).
+Run OpenClaw Gateway and Mission Control on one Ubuntu 24.04 Droplet with:
 
-If you want a $0/month option and don’t mind ARM + provider-specific setup, see the [Oracle Cloud guide](/platforms/oracle).
+- app code under `/opt/openclaw`
+- persistent runtime data under `/data/openclaw`
+- one explicit config file
+- one explicit workspace root
+- one explicit place for agent state, credentials, and sessions
 
-## Cost Comparison (2026)
+This layout avoids split-brain between a deployed runtime, a laptop workspace, and ad-hoc local files.
 
-| Provider     | Plan            | Specs                  | Price/mo    | Notes                                 |
-| ------------ | --------------- | ---------------------- | ----------- | ------------------------------------- |
-| Oracle Cloud | Always Free ARM | up to 4 OCPU, 24GB RAM | $0          | ARM, limited capacity / signup quirks |
-| Hetzner      | CX22            | 2 vCPU, 4GB RAM        | €3.79 (~$4) | Cheapest paid option                  |
-| DigitalOcean | Basic           | 1 vCPU, 1GB RAM        | $6          | Easy UI, good docs                    |
-| Vultr        | Cloud Compute   | 1 vCPU, 1GB RAM        | $6          | Many locations                        |
-| Linode       | Nanode          | 1 vCPU, 1GB RAM        | $5          | Now part of Akamai                    |
+## Canonical layout
 
-**Picking a provider:**
+Use this exact split:
 
-- DigitalOcean: simplest UX + predictable setup (this guide)
-- Hetzner: good price/perf (see [Hetzner guide](/install/hetzner))
-- Oracle Cloud: can be $0/month, but is more finicky and ARM-only (see [Oracle guide](/platforms/oracle))
+```text
+/opt/openclaw
+  docker-compose.yml
+  .env
+  deploy/digitalocean/openclaw.example.json5
+  scripts/deploy/prepare-droplet.sh
 
----
+/data/openclaw
+  logs/
+  state/
+    openclaw.json
+    credentials/
+    skills/
+    agents/
+      <agentId>/
+        agent/
+        sessions/
+  workspace/
+    <agentId>/
+      AGENTS.md
+      IDENTITY.md
+      SOUL.md
+      TOOLS.md
+      skills/
+```
 
-## Prerequisites
+What reads what:
 
-- DigitalOcean account ([signup with $200 free credit](https://m.do.co/c/signup))
-- SSH key pair (or willingness to use password auth)
-- ~20 minutes
+- Gateway config: `/data/openclaw/state/openclaw.json`
+- Gateway mutable state: `/data/openclaw/state`
+- Agent workspaces: `/data/openclaw/workspace/<agentId>`
+- Mission Control config path: `/data/openclaw/state/openclaw.json`
+- Mission Control gateway target: `ws://openclaw-gateway:18789`
 
-## 1) Create a Droplet
+## 1) Create the Droplet
 
-1. Log into [DigitalOcean](https://cloud.digitalocean.com/)
-2. Click **Create → Droplets**
-3. Choose:
-   - **Region:** Closest to you (or your users)
-   - **Image:** Ubuntu 24.04 LTS
-   - **Size:** Basic → Regular → **$6/mo** (1 vCPU, 1GB RAM, 25GB SSD)
-   - **Authentication:** SSH key (recommended) or password
-4. Click **Create Droplet**
-5. Note the IP address
-
-## 2) Connect via SSH
+Create an Ubuntu 24.04 Droplet and SSH into it:
 
 ```bash
 ssh root@YOUR_DROPLET_IP
 ```
 
-## 3) Install OpenClaw
+## 2) Install Docker
 
 ```bash
-# Update system
-apt update && apt upgrade -y
-
-# Install Node.js 22
-curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-apt install -y nodejs
-
-# Install OpenClaw
-curl -fsSL https://openclaw.ai/install.sh | bash
-
-# Verify
-openclaw --version
+apt-get update
+apt-get install -y git curl ca-certificates
+curl -fsSL https://get.docker.com | sh
+docker --version
+docker compose version
 ```
 
-## 4) Run Onboarding
+## 3) Clone the repo under /opt
 
 ```bash
-openclaw onboard --install-daemon
+mkdir -p /opt
+cd /opt
+git clone https://github.com/openclaw/openclaw.git
+cd openclaw
 ```
 
-The wizard will walk you through:
+## 4) Create the persistent data root
 
-- Model auth (API keys or OAuth)
-- Channel setup (Telegram, WhatsApp, Discord, etc.)
-- Gateway token (auto-generated)
-- Daemon installation (systemd)
-
-## 5) Verify the Gateway
+Create the host directories before starting the containers:
 
 ```bash
-# Check status
-openclaw status
-
-# Check service
-systemctl --user status openclaw-gateway.service
-
-# View logs
-journalctl --user -u openclaw-gateway.service -f
+mkdir -p /data/openclaw
+bash scripts/deploy/prepare-droplet.sh
 ```
 
-## 6) Access the Dashboard
+The helper creates:
 
-The gateway binds to loopback by default. To access the Control UI:
+- `/data/openclaw/state`
+- `/data/openclaw/workspace`
+- `/data/openclaw/logs`
+- per-agent workspace folders listed in `OPENCLAW_AGENT_WORKSPACES`
 
-**Option A: SSH Tunnel (recommended)**
+## 5) Configure the stack
+
+Copy the environment template:
 
 ```bash
-# From your local machine
-ssh -L 18789:localhost:18789 root@YOUR_DROPLET_IP
-
-# Then open: http://localhost:18789
+cp .env.example .env
 ```
 
-**Option B: Tailscale Serve (HTTPS, loopback-only)**
+Edit `.env` and set at least:
+
+- `OPENCLAW_HOST_DATA_ROOT=/data/openclaw`
+- `OPENCLAW_STATE_DIR=/data/openclaw/state`
+- `OPENCLAW_CONFIG_PATH=/data/openclaw/state/openclaw.json`
+- `OPENCLAW_WORKSPACE_DIR=/data/openclaw/workspace/jannetje`
+- `OPENCLAW_GATEWAY_TOKEN=<long-random-token>`
+- `OPENCLAW_MISSION_CONTROL_GATEWAY_TOKEN=<same token>`
+
+Reasonable defaults:
+
+- `OPENCLAW_GATEWAY_PUBLISH_HOST=0.0.0.0`
+- `MISSION_CONTROL_PUBLISH_HOST=127.0.0.1`
+
+Keep Mission Control loopback-only unless you are intentionally fronting it with a reverse proxy or other access layer.
+
+## 6) Install the config file
+
+Copy the example config into the persistent state dir:
 
 ```bash
-# On the droplet
-curl -fsSL https://tailscale.com/install.sh | sh
-tailscale up
-
-# Configure Gateway to use Tailscale Serve
-openclaw config set gateway.tailscale.mode serve
-openclaw gateway restart
+cp deploy/digitalocean/openclaw.example.json5 /data/openclaw/state/openclaw.json
 ```
 
-Open: `https://<magicdns>/`
+Edit `/data/openclaw/state/openclaw.json` and adjust:
 
-Notes:
+- agent IDs and names
+- agent workspace paths
+- channel credentials and allowlists
+- model configuration
+- any hooks or tool settings
 
-- Serve keeps the Gateway loopback-only and authenticates via Tailscale identity headers.
-- To require token/password instead, set `gateway.auth.allowTailscale: false` or use `gateway.auth.mode: "password"`.
+The example uses three agents:
 
-**Option C: Tailnet bind (no Serve)**
+- `jannetje`
+- `beppie`
+- `cornelis`
+
+If your agent IDs differ, change the workspace paths to match.
+
+## 7) Move your workspace files into the canonical home
+
+For each agent, copy the workspace files into `/data/openclaw/workspace/<agentId>/`.
+
+Typical files:
+
+- `AGENTS.md`
+- `IDENTITY.md`
+- `SOUL.md`
+- `TOOLS.md`
+- `skills/`
+- `MEMORY.md` or `memory.md`
+- any agent-local assets referenced from the workspace
+
+Example:
 
 ```bash
-openclaw config set gateway.bind tailnet
-openclaw gateway restart
+rsync -av /path/to/old-workspace/jannetje/ /data/openclaw/workspace/jannetje/
+rsync -av /path/to/old-workspace/beppie/ /data/openclaw/workspace/beppie/
+rsync -av /path/to/old-workspace/cornelis/ /data/openclaw/workspace/cornelis/
 ```
 
-Open: `http://<tailscale-ip>:18789` (token required).
+## 8) Start the stack
 
-## 7) Connect Your Channels
-
-### Telegram
+Build and start:
 
 ```bash
-openclaw pairing list telegram
-openclaw pairing approve telegram <CODE>
+docker compose up -d --build openclaw-gateway mission-control
 ```
 
-### WhatsApp
+Follow logs:
 
 ```bash
-openclaw channels login whatsapp
-# Scan QR code
+docker compose logs -f openclaw-gateway
+docker compose logs -f mission-control
 ```
 
-See [Channels](/channels) for other providers.
+## 9) Verify the canonical home
 
----
-
-## Optimizations for 1GB RAM
-
-The $6 droplet only has 1GB RAM. To keep things running smoothly:
-
-### Add swap (recommended)
+Sanity check the running layout:
 
 ```bash
-fallocate -l 2G /swapfile
-chmod 600 /swapfile
-mkswap /swapfile
-swapon /swapfile
-echo '/swapfile none swap sw 0 0' >> /etc/fstab
+docker compose exec openclaw-gateway printenv OPENCLAW_STATE_DIR OPENCLAW_CONFIG_PATH OPENCLAW_WORKSPACE_DIR
+docker compose exec mission-control printenv OPENCLAW_CONFIG_PATH OPENCLAW_MISSION_CONTROL_GATEWAY_URL
+docker compose exec openclaw-gateway sh -lc 'node /app/openclaw.mjs gateway health --url ws://127.0.0.1:18789 --token "$OPENCLAW_GATEWAY_TOKEN"'
 ```
 
-### Use a lighter model
+The expected answers are:
 
-If you're hitting OOMs, consider:
+- Gateway state dir is `/data/openclaw/state`
+- Gateway config path is `/data/openclaw/state/openclaw.json`
+- Gateway default workspace is inside `/data/openclaw/workspace/...`
+- Mission Control config path is `/data/openclaw/state/openclaw.json`
+- Mission Control gateway URL is `ws://openclaw-gateway:18789`
 
-- Using API-based models (Claude, GPT) instead of local models
-- Setting `agents.defaults.model.primary` to a smaller model
+## Migration plan from a laptop or Railway
 
-### Monitor memory
+Use this order:
 
-```bash
-free -h
-htop
-```
+1. Freeze changes on the old host so the laptop and Railway stop diverging.
+2. Export or copy the current useful config, credentials, sessions, and workspace files from the old environment.
+3. Create `/data/openclaw` on the Droplet.
+4. Copy `deploy/digitalocean/openclaw.example.json5` to `/data/openclaw/state/openclaw.json` and merge in the real settings.
+5. Copy each agent workspace into `/data/openclaw/workspace/<agentId>/`.
+6. If you need historical runtime state, copy the useful parts into `/data/openclaw/state`, especially:
+   - `credentials/`
+   - `agents/<agentId>/agent/`
+   - `agents/<agentId>/sessions/`
+   - `skills/`
+7. Start the Droplet stack.
+8. Verify Mission Control and the gateway both point at the Droplet paths above.
+9. Only after verification, disable Railway as the primary runtime.
 
----
+## Checklist
 
-## Persistence
+You are done when all of these are true:
 
-All state lives in:
+- `docker compose ps` shows `openclaw-gateway` and `mission-control` running on the Droplet.
+- `docker compose exec openclaw-gateway printenv OPENCLAW_STATE_DIR` returns `/data/openclaw/state`.
+- `docker compose exec mission-control printenv OPENCLAW_CONFIG_PATH` returns `/data/openclaw/state/openclaw.json`.
+- `docker compose exec mission-control printenv OPENCLAW_MISSION_CONTROL_GATEWAY_URL` returns `ws://openclaw-gateway:18789`.
+- `/data/openclaw/state/openclaw.json` is the only config file you edit for the deployment.
+- `/data/openclaw/workspace/<agentId>/` contains the live workspace files for each agent.
+- New session transcripts appear under `/data/openclaw/state/agents/<agentId>/sessions/`.
+- Managed skills and credentials appear under `/data/openclaw/state/...`, not on a laptop-only path.
+- Railway is no longer receiving the traffic or acting as the main runtime.
 
-- `~/.openclaw/` — config, credentials, session data
-- `~/.openclaw/workspace/` — workspace (SOUL.md, memory, etc.)
+## Notes
 
-These survive reboots. Back them up periodically:
-
-```bash
-tar -czvf openclaw-backup.tar.gz ~/.openclaw ~/.openclaw/workspace
-```
-
----
-
-## Oracle Cloud Free Alternative
-
-Oracle Cloud offers **Always Free** ARM instances that are significantly more powerful than any paid option here — for $0/month.
-
-| What you get      | Specs                  |
-| ----------------- | ---------------------- |
-| **4 OCPUs**       | ARM Ampere A1          |
-| **24GB RAM**      | More than enough       |
-| **200GB storage** | Block volume           |
-| **Forever free**  | No credit card charges |
-
-**Caveats:**
-
-- Signup can be finicky (retry if it fails)
-- ARM architecture — most things work, but some binaries need ARM builds
-
-For the full setup guide, see [Oracle Cloud](/platforms/oracle). For signup tips and troubleshooting the enrollment process, see this [community guide](https://gist.github.com/rssnyder/51e3cfedd730e7dd5f4a816143b25dbd).
-
----
-
-## Troubleshooting
-
-### Gateway won't start
-
-```bash
-openclaw gateway status
-openclaw doctor --non-interactive
-journalctl -u openclaw --no-pager -n 50
-```
-
-### Port already in use
-
-```bash
-lsof -i :18789
-kill <PID>
-```
-
-### Out of memory
-
-```bash
-# Check memory
-free -h
-
-# Add more swap
-# Or upgrade to $12/mo droplet (2GB RAM)
-```
-
----
-
-## See Also
-
-- [Hetzner guide](/install/hetzner) — cheaper, more powerful
-- [Docker install](/install/docker) — containerized setup
-- [Tailscale](/gateway/tailscale) — secure remote access
-- [Configuration](/gateway/configuration) — full config reference
+- The Compose stack in this repo uses dedicated Droplet startup scripts, not the Railway-oriented runtime entrypoint.
+- Gateway and Mission Control share the same persistent state tree, but Mission Control stays explicit about its gateway target so it does not accidentally drift to its own container-local `127.0.0.1`.
+- If you need the dashboard publicly reachable, change `MISSION_CONTROL_PUBLISH_HOST` to `0.0.0.0` and put it behind your normal network and auth controls.

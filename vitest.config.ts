@@ -13,6 +13,7 @@ export default defineConfig({
   resolve: {
     alias: {
       "openclaw/plugin-sdk": path.join(repoRoot, "src", "plugin-sdk", "index.ts"),
+      "server-only": path.join(repoRoot, "test", "server-only.ts"),
     },
   },
   test: {
@@ -20,7 +21,12 @@ export default defineConfig({
     hookTimeout: isWindows ? 180_000 : 120_000,
     pool: "forks",
     maxWorkers: isCI ? ciWorkers : localWorkers,
-    include: ["src/**/*.test.ts", "extensions/**/*.test.ts", "test/format-error.test.ts"],
+    include: [
+      "src/**/*.test.ts",
+      "extensions/**/*.test.ts",
+      "apps/mission-control/**/*.test.ts",
+      "test/format-error.test.ts",
+    ],
     setupFiles: ["test/setup.ts"],
     exclude: [
       "dist/**",

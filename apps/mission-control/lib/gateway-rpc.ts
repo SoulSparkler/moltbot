@@ -79,6 +79,11 @@ function resolveStateDir(env: NodeJS.ProcessEnv = process.env) {
 }
 
 function resolveConfigPath(env: NodeJS.ProcessEnv = process.env) {
+  const missionControlConfigPath = env.OPENCLAW_MISSION_CONTROL_CONFIG_PATH?.trim();
+  if (missionControlConfigPath) {
+    return path.resolve(missionControlConfigPath);
+  }
+
   const explicit = env.OPENCLAW_CONFIG_PATH?.trim() || env.CLAWDBOT_CONFIG_PATH?.trim();
   if (explicit) {
     return path.resolve(explicit);
@@ -101,6 +106,12 @@ function resolveConfigPath(env: NodeJS.ProcessEnv = process.env) {
   });
 
   return existing ?? candidates[0] ?? null;
+}
+
+function resolveExplicitMissionGatewayUrl(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const directUrl =
+    env.OPENCLAW_MISSION_CONTROL_GATEWAY_URL?.trim() || env.OPENCLAW_GATEWAY_URL?.trim();
+  return directUrl || undefined;
 }
 
 async function readGatewayConfig(): Promise<MissionGatewayConfig> {
@@ -155,6 +166,14 @@ function rawDataToString(data: RawData): string {
 }
 
 function resolveGatewayUrl(config: AnyRecord | null): { url: string; rejectUnauthorized: boolean } {
+  const explicitUrl = resolveExplicitMissionGatewayUrl(process.env);
+  if (explicitUrl) {
+    return {
+      url: explicitUrl,
+      rejectUnauthorized: true,
+    };
+  }
+
   const gateway = asRecord(config?.gateway);
   const remote = asRecord(gateway?.remote);
   const isRemoteMode = asString(gateway?.mode) === "remote";
@@ -196,11 +215,13 @@ function resolveAuth(config: AnyRecord | null) {
 
   return {
     token:
+      process.env.OPENCLAW_MISSION_CONTROL_GATEWAY_TOKEN?.trim() ||
       process.env.OPENCLAW_GATEWAY_TOKEN?.trim() ||
       process.env.CLAWDBOT_GATEWAY_TOKEN?.trim() ||
       (isRemoteMode ? asString(remote?.token) : undefined) ||
       asString(auth?.token),
     password:
+      process.env.OPENCLAW_MISSION_CONTROL_GATEWAY_PASSWORD?.trim() ||
       process.env.OPENCLAW_GATEWAY_PASSWORD?.trim() ||
       process.env.CLAWDBOT_GATEWAY_PASSWORD?.trim() ||
       (isRemoteMode ? asString(remote?.password) : undefined) ||
